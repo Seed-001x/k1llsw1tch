@@ -81,6 +81,22 @@ export class Risk {
     }
   }
 
+  /** Deliberate human resume also releases the EQUITY KILL (fix 2026-10-17:
+   *  the latch shipped with no clearing path at all — checkKill could set
+   *  it and nothing in the codebase could unset it, so the "permanent
+   *  halt" was permanent against the owner's own deliberate resume too.
+   *  Clearing follows the clearDownHalt shape: the latch releases and the
+   *  start-equity anchor nulls; the /resume handler re-anchors it at the
+   *  wallet balance it reads at that moment (initEquity), so the kill
+   *  floor going forward is a fraction of the equity the human resumed
+   *  with — never the stale pre-kill anchor. */
+  clearKill() {
+    this.s.killed = false;
+    this.s.killReason = null;
+    this.s.startEquitySol = null;
+    this.save();
+  }
+
   /** Deliberate human resume: release the balance-halt latch; the next equity check re-anchors. */
   clearDownHalt() {
     this.s.downHalted = false;

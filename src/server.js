@@ -486,6 +486,10 @@ export function startServer(bot, port) {
       try { bot.risk.clearDownHalt(); } catch {}
       try { bot.risk.clearStreakPause(); } catch {}
       try { bot.risk.clearBrakeWipe(); } catch {}
+      // Equity kill release (2026-10-17): clearKill nulls the anchor, so
+      // re-anchor NOW at the live wallet balance — the equity the human
+      // is deliberately resuming with becomes the kill floor's basis.
+      try { bot.risk.clearKill(); bot.exec.solBalance().then(bal => { if (bal != null) bot.risk.initEquity(bal); }).catch(() => {}); } catch {}
       return json(res, 200, { ok: true, halted: false });
     }
     if (req.method === 'POST' && u.pathname === '/risk/reset') {
