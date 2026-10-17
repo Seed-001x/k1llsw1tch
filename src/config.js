@@ -591,6 +591,29 @@ export function loadConfig(env = process.env) {
     stallExit: num(env, 'STALL_EXIT', 1),                 // kill switch: 0 = no general downside exit pre-TP2 besides liquidity death (the owner's chosen shape if flipped)
     stallExitMinAgeSec: num(env, 'STALL_EXIT_MIN_AGE_SEC', 180), // the "3M": the rule does not exist for a younger position — no pending can stamp
     stallExitConfirmSec: num(env, 'STALL_EXIT_CONFIRM_SEC', 60), // the "60 sec confirm": dead flow must still hold this long after the pending stamps, judged on the first check at/after the lapse
+    // DEATH DETECTOR (owner design 2026-10-17 ~18:37 EDT, "put it to a test
+    // with a .02 buy with our last funds"; combination rule delegated to the
+    // agent): NOT a stop-loss — no price floor, no arming on targets, PnL is
+    // never an input. Every position check re-asks "is this coin alive right
+    // now?" from three moment vitals: (1) the realizable sell quote vs the
+    // screen value of the bag (execRatio — the exit door closing), (2) the
+    // liquidity SLOPE over the trailing window (real reads only; a $0 or
+    // missing read is UNKNOWN, never a drain), (3) sized sell pressure
+    // (sells dominating buys in dollars over the 5m window). A sell needs
+    // 2 of 3 vitals bad, still bad on the first check after the confirm
+    // window — EXCEPT a hard quote collapse, which fires solo and instantly:
+    // if the exit door is actually closing there is no second opinion to
+    // wait for. Pre-TP1 positions only (the bleed zone); once TP1 banks,
+    // the ladder owns the position. Protect/takeover silence it like the
+    // rest of the downside family. DEATH_DETECTOR=1 turns it live.
+    deathDetector: env.DEATH_DETECTOR === '1',
+    ddQuoteBad: num(env, 'DD_QUOTE_BAD', 0.70),           // execRatio at/below this = quote vital bad (bag fetches <= 70% of screen value)
+    ddQuoteCollapse: num(env, 'DD_QUOTE_COLLAPSE', 0.50), // execRatio at/below this = collapse: solo instant fire
+    ddLiqDropPct: num(env, 'DD_LIQ_DROP_PCT', 0.40),      // liquidity down >= this fraction across the window = liq vital bad
+    ddLiqWindowSec: num(env, 'DD_LIQ_WINDOW_SEC', 180),   // trailing window for the liquidity slope read
+    ddFlowSellMult: num(env, 'DD_FLOW_SELL_MULT', 2),     // sells >= this x buys (count, 5m) toward the flow vital
+    ddFlowMinUsd: num(env, 'DD_FLOW_MIN_USD', 400),       // ...AND >= this much estimated sell-side $ in the 5m window (sized, not dust)
+    ddConfirmSec: num(env, 'DD_CONFIRM_SEC', 10),         // 2-of-3 must still read bad on the first check at/after this lapse
     dipStopPct: num(env, 'DIP_STOP_PCT', 0.05),           // sell if PRICE drops this far below entry (0 = off)
     stallSec: num(env, 'STALL_SEC', 60),                  // entry stall: sell if price never breaks out within this many seconds of entry (0 = off)
     stallBandPct: num(env, 'STALL_BAND_PCT', 0.05),       // entry range half-width: at stallSec the price must be OUTSIDE entry ± this or the position sells (user 2026-10-13 endpoint version)

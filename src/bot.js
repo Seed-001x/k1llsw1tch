@@ -3771,6 +3771,85 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
     // (TP ladder, Tratchet, dead-flow, momentum-failure, stall/
     // probation, moonbag trim/floor, liquidity-death/undertaker) judges
     // base positions exactly as it judges every other position.
+    // DEATH DETECTOR (owner design 2026-10-17, combination rule delegated):
+    // judged HERE, beside the other managePosition overrides, on the same
+    // check's own data — the fresh realizable sell quote (valueSol), the
+    // latest view (v: price / liq / 5m flow) and this position's own liq
+    // history. No price floor, no PnL input, no arming: the question is
+    // re-asked from scratch on every check — "is this coin alive right
+    // now?" Scope: pre-TP1 only, and only over a HOLD decision (a stack
+    // decision to bank or sell on this check is never overridden).
+    // Vitals (any one can read UNKNOWN — missing data never counts as bad):
+    //   quote — execRatio = realizable quote value / screen value of the
+    //     bag (tokens x view price). Bad <= DD_QUOTE_BAD; a collapse
+    //     <= DD_QUOTE_COLLAPSE fires solo, instantly, no confirm.
+    //   liq — slope across DD_LIQ_WINDOW_SEC from this position's own
+    //     real (> 0) liq reads; down >= DD_LIQ_DROP_PCT is bad. A $0 or
+    //     missing read is skipped entirely: one indexer's silence is
+    //     unknown, never a drain (owner, 2026-10-17).
+    //   flow — sells >= DD_FLOW_SELL_MULT x buys in the 5m window AND
+    //     estimated sell-side $ (volM5 x sell share) >= DD_FLOW_MIN_USD.
+    // Fire rule: collapse, OR >= 2 vitals bad on this check AND still
+    // >= 2 bad on the first check at/after DD_CONFIRM_SEC from the
+    // pending stamp. The read rides pos.ddVitals for /state.
+    if (this.cfg.deathDetector && valueSol != null && decision.fraction === 0 && !pos.tp1Done && !pos.protected && !pos.takenOver) {
+      try {
+        const dd = this.stats.deathDetector = this.stats.deathDetector || { pendings: 0, cancelled: 0, fires: 0, collapses: 0 };
+        // --- quote vital: realizable vs screen value of the whole bag
+        let execRatio = null;
+        if (v.price > 0 && solUsd > 0 && pos.decimals != null && Number(pos.tokensRaw) > 0) {
+          const screenSol = (Number(pos.tokensRaw) / 10 ** pos.decimals) * v.price / solUsd;
+          if (screenSol > 0) execRatio = valueSol / screenSol;
+        }
+        const quoteBad = execRatio != null && execRatio <= this.cfg.ddQuoteBad;
+        const collapse = execRatio != null && execRatio <= this.cfg.ddQuoteCollapse;
+        // --- liq vital: slope over this position's own real reads
+        pos.ddLiqHist = pos.ddLiqHist || [];
+        if (v.liq > 0) { pos.ddLiqHist.push({ ts: n, liq: v.liq }); if (pos.ddLiqHist.length > 90) pos.ddLiqHist.splice(0, pos.ddLiqHist.length - 90); }
+        let liqDropPct = null;
+        if (v.liq > 0 && pos.ddLiqHist.length >= 2) {
+          const winMs = this.cfg.ddLiqWindowSec * 1000;
+          const ref = pos.ddLiqHist.filter(s => s.ts <= n - winMs * 0.5 && s.ts >= n - winMs * 1.5).pop();
+          const first = pos.ddLiqHist[0];
+          const base = ref || (n - first.ts >= 60000 ? first : null);
+          if (base && base.liq > 0 && base.ts < n) liqDropPct = 1 - v.liq / base.liq;
+        }
+        const liqBad = liqDropPct != null && liqDropPct >= this.cfg.ddLiqDropPct;
+        // --- flow vital: sized sell pressure in the 5m window
+        let sellMult = null, sellUsd = null, flowBad = false;
+        if (v.buysM5 != null && v.sellsM5 != null && (v.buysM5 + v.sellsM5) >= 10) {
+          sellMult = v.sellsM5 / Math.max(1, v.buysM5);
+          sellUsd = (v.volM5 || 0) * (v.sellsM5 / (v.buysM5 + v.sellsM5));
+          flowBad = sellMult >= this.cfg.ddFlowSellMult && sellUsd >= this.cfg.ddFlowMinUsd;
+        }
+        const bad = [];
+        if (quoteBad) bad.push('quote');
+        if (liqBad) bad.push('liq');
+        if (flowBad) bad.push('flow');
+        pos.ddVitals = { ts: n, execRatio: execRatio != null ? +execRatio.toFixed(3) : null, liqDropPct: liqDropPct != null ? +liqDropPct.toFixed(3) : null, sellMult: sellMult != null ? +sellMult.toFixed(2) : null, sellUsd: sellUsd != null ? Math.round(sellUsd) : null, bad, pending: !!pos.ddPendingSince };
+        const vitalsStr = `exec ${execRatio != null ? execRatio.toFixed(2) : '?'}, liq ${liqDropPct != null ? (liqDropPct * 100).toFixed(0) + '%/' + this.cfg.ddLiqWindowSec + 's' : '?'}, sells ${sellMult != null ? sellMult.toFixed(1) + 'x $' + Math.round(sellUsd) : '?'}`;
+        if (collapse) {
+          dd.collapses++; dd.fires++;
+          console.log(`[deathdetector] ${pos.symbol}: QUOTE COLLAPSE — realizable quote at ${execRatio.toFixed(2)} of screen value; selling in full now (${vitalsStr})`);
+          decision = { fraction: 1, reason: `death detector: quote collapse (${vitalsStr})`, newPeak: decision.newPeak || pos.peakRatio, deathDetector: true };
+          pos.ddPendingSince = null;
+        } else if (bad.length >= 2) {
+          if (!pos.ddPendingSince) {
+            pos.ddPendingSince = n; dd.pendings++;
+            console.log(`[deathdetector] ${pos.symbol}: vitals bad (${bad.join('+')}) — confirm window ${this.cfg.ddConfirmSec}s started (${vitalsStr})`);
+          } else if (n - pos.ddPendingSince >= this.cfg.ddConfirmSec * 1000) {
+            dd.fires++;
+            console.log(`[deathdetector] ${pos.symbol}: vitals still bad (${bad.join('+')}) after the confirm window — selling in full (${vitalsStr})`);
+            decision = { fraction: 1, reason: `death detector: ${bad.join('+')} (${vitalsStr})`, newPeak: decision.newPeak || pos.peakRatio, deathDetector: true };
+            pos.ddPendingSince = null;
+          }
+        } else if (pos.ddPendingSince) {
+          pos.ddPendingSince = null; dd.cancelled++;
+          console.log(`[deathdetector] ${pos.symbol}: vitals recovered inside the confirm window — pending cancelled (${vitalsStr})`);
+        }
+        pos.ddVitals.pending = !!pos.ddPendingSince;
+      } catch (e) { this.err(`death detector ${pos.symbol}`, e); }
+    }
     pos.peakRatio = decision.newPeak || pos.peakRatio;
     // position-tick journal (record-only): this check's mark, recorded AFTER the
     // peak update so peakRatio in the record includes this check — the write
