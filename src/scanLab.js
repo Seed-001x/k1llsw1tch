@@ -16,7 +16,7 @@
 // is in-memory, rebuilt at boot from recent unscored journal sessions.
 import fs from 'node:fs';
 import path from 'node:path';
-import { round } from './util.js';
+import { round, readTailLines } from './util.js';
 
 export const SCAN_CPS = [15, 60];        // checkpoint minutes after session lastTs
 const EXPIRE_MIN = 105;                  // finalize partial once past lastTs + 60m + 45m grace
@@ -33,7 +33,7 @@ export class ScanLab {
     this.pending = new Map(); // session id -> { id, mint, symbol, lastTs, lastPrice, got: {} }
     this._booted = false;
     try {
-      for (const line of fs.readFileSync(this.file, 'utf8').split('\n').filter(Boolean)) {
+      for (const line of readTailLines(this.file, 12 * 1024 * 1024)) /* byte-capped tail (2026-10-18 boot-OOM fix) */ {
         try { const r = JSON.parse(line); if (r && r.id) this.scores.set(r.id, r); } catch { /* skip bad line */ }
       }
     } catch { /* no scores yet */ }

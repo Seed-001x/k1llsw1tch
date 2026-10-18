@@ -75,7 +75,7 @@
 // records, card off).
 import fs from 'node:fs';
 import path from 'node:path';
-import { median, round } from './util.js';
+import { median, round, readTailLines } from './util.js';
 import { completedCandles, scoreMark } from './structureWatch.js';
 
 export const BOTTOM_READY_N = 30;          // finalized marks before the card reads READY
@@ -252,7 +252,7 @@ export class BottomWatch {
     const f = this._file();
     if (!f) return [];
     let txt = '';
-    try { txt = fs.readFileSync(f, 'utf8'); } catch { return []; }
+    try { txt = readTailLines(f, 20 * 1024 * 1024).join('\n'); } catch { return []; } /* byte-capped tail (2026-10-18 boot-OOM fix) */
     const out = [];
     for (const line of txt.split('\n')) {
       if (!line.trim()) continue;

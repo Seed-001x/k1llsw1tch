@@ -35,7 +35,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fetchJson } from './util.js';
+import { fetchJson, readTailLines } from './util.js';
 import { relayRoutePump } from './relayFetch.js';
 import { fetchGtJson } from './gtFetch.js';
 import { flowRpc, parseWalletBuys, parseWalletSells, FLOW_DUST_SOL } from './flowWatch.js';
@@ -203,7 +203,7 @@ export class WalletWatch {
   _load() {
     if (!this.file) return;
     try {
-      for (const l of fs.readFileSync(this.file, 'utf8').split('\n')) {
+      for (const l of readTailLines(this.file, 16 * 1024 * 1024) /* byte-capped tail (2026-10-18 boot-OOM fix) */) {
         if (!l.trim()) continue;
         let r; try { r = JSON.parse(l); } catch { continue; }
         if (r.t === 'ev' && r.ev && r.ev.id) {

@@ -28,7 +28,7 @@
 // reach a trading path. Holder sampling rides the bot's existing DAS helper
 // (the Bot passes its knob-respecting _dasHolderSample as fetchHolders).
 import fs from 'node:fs';
-import { fetchJson, median, round } from './util.js';
+import { fetchJson, median, round, readTailLines } from './util.js';
 import { fetchGtJson } from './gtFetch.js';
 import { fetchHolderCount } from './gate.js';
 
@@ -267,12 +267,13 @@ export class StructureWatch {
   _readAll() {
     const f = this._file();
     if (!f) return [];
-    let txt = '';
-    try { txt = fs.readFileSync(f, 'utf8'); } catch { return []; }
+    // Byte-capped tail (2026-10-18 boot-OOM fix): watches live for hours,
+    // so the last ~24MB of journal covers every live watch; older history
+    // folds out of the boot aggregates instead of OOMing the instance.
     const out = [];
-    for (const line of txt.split('\n')) {
+    for (const line of readTailLines(f, 24 * 1024 * 1024)) {
       if (!line.trim()) continue;
-      try { out.push(JSON.parse(line)); } catch { /* torn tail line — skip */ }
+      try { out.push(JSON.parse(line)); } catch { /* torn tail line - skip */ }
     }
     return out;
   }

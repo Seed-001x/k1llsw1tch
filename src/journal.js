@@ -24,7 +24,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { mean, median, round } from './util.js';
+import { mean, median, round, readTailLines } from './util.js';
 import { pickResignalMark, verdictOf, buildResignalCard } from './resignalLab.js';
 import { foldStampedPopSignals, buildDeadEntryCard } from './deadEntryLab.js';
 
@@ -33,10 +33,10 @@ const EXPIRE_MIN = 90;
 const KEEP = 5000;
 
 function readTail(file, n) {
-  try {
-    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
-    return lines.slice(-n).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-  } catch { return []; }
+  // Byte-capped tail (2026-10-18 boot-OOM fix): never materialize a whole
+  // journal file at boot — read at most ~n records' worth of tail bytes.
+  const budget = Math.min(48 * 1024 * 1024, Math.max(4 * 1024 * 1024, n * 1500));
+  return readTailLines(file, budget).slice(-n).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
 
 function readAll(file) {

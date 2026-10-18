@@ -1,4 +1,30 @@
+import fs from 'node:fs';
+
 export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * Read only the TAIL of a (possibly huge) append-only file: at most the
+ * last `maxBytes` bytes, returned as complete lines (the first partial
+ * line is dropped). Boot-time folds use this so a journal file that has
+ * grown to hundreds of MB cannot OOM the 512Mi instance at startup —
+ * the failure that downed the bot on 2026-10-18 (three deploys and two
+ * restarts OOM-killed at boot on state accumulated since 2026-10-15,
+ * even on the previously-good commit). Returns [] on any error.
+ */
+export function readTailLines(file, maxBytes) {
+  try {
+    const size = fs.statSync(file).size;
+    if (size <= maxBytes) return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(maxBytes);
+      fs.readSync(fd, buf, 0, maxBytes, size - maxBytes);
+      const lines = buf.toString('utf8').split('\n');
+      lines.shift(); // partial first line
+      return lines.filter(Boolean);
+    } finally { fs.closeSync(fd); }
+  } catch { return []; }
+}
 export const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 export const SOL_MINT = 'So11111111111111111111111111111111111111112';
 export const LAMPORTS = 1e9;
