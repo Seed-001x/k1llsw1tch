@@ -22,44 +22,19 @@
 // the ratio sits below 85% of the position's own sampled peak. A sample
 // with missing flow fields can score but can never be fake-alive.
 
-const RING_CAP = 240; // scored samples remembered for trailing-window reads (~40 min at the 10s cadence)
-
-export function sampleFakeAlive(pos, { ratio, buysM5, sellsM5, ts }) {
+export function sampleFakeAlive(pos, { ratio, buysM5, sellsM5 }) {
   if (ratio == null || !Number.isFinite(ratio)) return pos.fakeAlive || null;
-  const fa = pos.fakeAlive || (pos.fakeAlive = { samples: 0, fake: 0, share: null, lastRatio: null, peakRatio: null, ring: [] });
-  if (!Array.isArray(fa.ring)) fa.ring = []; // positions persisted before the ring existed
+  const fa = pos.fakeAlive || (pos.fakeAlive = { samples: 0, fake: 0, share: null, lastRatio: null, peakRatio: null });
   fa.peakRatio = fa.peakRatio == null ? ratio : Math.max(fa.peakRatio, ratio);
   if (fa.lastRatio == null) { fa.lastRatio = ratio; return fa; }
   fa.samples++;
   const balanced = buysM5 != null && sellsM5 != null && buysM5 >= 0.7 * Math.max(sellsM5, 1);
   const falling = ratio < fa.lastRatio;
   const belowPeak = ratio < 0.85 * fa.peakRatio;
-  const isFake = balanced && falling && belowPeak;
-  if (isFake) fa.fake++;
+  if (balanced && falling && belowPeak) fa.fake++;
   fa.share = fa.samples ? +(fa.fake / fa.samples).toFixed(3) : null;
   fa.lastRatio = ratio;
-  if (ts != null) {
-    fa.ring.push({ ts, f: isFake ? 1 : 0 });
-    if (fa.ring.length > RING_CAP) fa.ring.splice(0, fa.ring.length - RING_CAP);
-  }
   return fa;
-}
-
-/**
- * Trailing-window fake-alive read (the grind judge's input): share over
- * scored samples with ts inside the last `windowMs`. Null when the
- * position carries no ring (pre-ring positions, kill switch off).
- */
-export function fakeAliveWindow(pos, now, windowMs) {
-  const fa = pos && pos.fakeAlive;
-  if (!fa || !Array.isArray(fa.ring)) return null;
-  const since = now - windowMs;
-  let samples = 0, fake = 0;
-  for (const r of fa.ring) {
-    if (r.ts < since) continue;
-    samples++; fake += r.f || 0;
-  }
-  return { samples, fake, share: samples ? +(fake / samples).toFixed(3) : null };
 }
 
 // The compact stamp carried on /state positions and close records.

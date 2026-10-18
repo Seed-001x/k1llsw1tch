@@ -35,24 +35,6 @@ if (cfg.liveFeed) {
   process.on('SIGTERM', () => feed.stop());
 }
 
-// Wallet census (owner route order 2026-10-18, "Websocket"): a Helius RPC
-// websocket keeps a per-open-position census of who is actually trading
-// (distinct buyers / first-seen buyers / wash overlap) — the grind judge's
-// second witness. Record-only plumbing; fail-open like every watcher here.
-if (cfg.censusWatch) {
-  const { CensusFeed } = await import('./census.js');
-  const census = new CensusFeed({
-    rpcUrls: cfg.rpcUrls,
-    rpcFn: (m, p) => exec.rpcFn(m, p),
-    onTrade: (mint, trade) => bot._censusOnTrade(mint, trade),
-    onStats: (s) => { bot.stats.census = s; },
-  });
-  bot.censusFeed = census;
-  census.start();
-  process.on('SIGTERM', () => census.stop());
-  console.log('[edgebot] census watch: Helius websocket per open position (record-only; feeds the grind judge)');
-}
-
 // Smart-wallet flow (user 2026-10-14): tracked wallets' buys fire 'flow' signals into
 // the same onSignal pipeline. Polls the existing Helius RPC; inert unless FLOW_WALLETS
 // or FLOW_SOLO_WALLETS is set. Fail-open.
