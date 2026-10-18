@@ -265,7 +265,10 @@ test('dip watch: RANGE_LIVE=0 disables the deferred path too', async () => {
 const BMARK = { type: 'mark', ts: T0, markId: 'bw-MINTB-1-m1', episodeId: 'bw-MINTB-1', mint: 'MINTB', symbol: 'BOTM', source: 'watched', qualified: true, peakPrice: 2, peakMc: 100_000, lowPrice: 1, lowMc: 50_000, lowTs: T0 - 600000, drawdownPct: 50, quietSec: 300, markPrice: 1.2, markMc: 60_000, pctOffLow: 20, pctOfPeakRecovered: 60, flowKnown: true, buysM5: 30, sellsM5: 10, buyShare: 0.75 };
 
 function bottomRig(over = {}, env = {}) {
-  const r = rangeRig(over, env);
+  // PREENTRY_CENSUS off here: these tests pin the bottom ROUTE itself
+  // (the direct path the switch restores); the pre-entry watch that now
+  // sits on it by default is owned by tests/preentry.test.mjs.
+  const r = rangeRig(over, { PREENTRY_CENSUS: '0', ...env });
   r.views.set('MINTB', view({ address: 'MINTB', symbol: 'BOTM' }));
   return r;
 }

@@ -40,6 +40,7 @@ import { gtOutcomesSnapshot } from './gtFetch.js';
 import { configStamp } from './stamp.js';
 import { sampleFakeAlive, fakeAliveStamp, fakeAliveWindow } from './fakeAlive.js';
 import { newCensus, censusFold, censusWindow, censusStamp } from './census.js';
+import { evaluatePreEntry, preEntryReason } from './preEntry.js';
 import { evaluateGrind, grindReason, grindKillTally } from './grindJudge.js';
 
 // Scan Ledger: a watch session finalizes at this age even if the coin is
@@ -303,6 +304,11 @@ export class Bot {
         if (!pos.census) pos.census = newCensus(this.now());
         censusFold(pos.census, trade, this.now());
       }
+      // PRE-ENTRY watches fold the same stream (owner order 2026-10-18):
+      // the census works both ways — it witnesses open positions AND
+      // vets bottom marks before they spend.
+      const pw = this.preEntryWatch && this.preEntryWatch.get(mint);
+      if (pw) censusFold(pw.census, trade, this.now());
     } catch { /* census is an observer */ }
   }
 
@@ -313,7 +319,11 @@ export class Bot {
     try {
       if (!this.cfg.censusWatch) return;
       for (const pos of this.positions) if (!pos.census) pos.census = newCensus(this.now());
-      if (this.censusFeed) this.censusFeed.setDesired(this.positions.map(p => p.mint));
+      if (this.censusFeed) {
+        const wanted = new Set(this.positions.map(p => p.mint));
+        if (this.preEntryWatch) for (const mint of this.preEntryWatch.keys()) wanted.add(mint);
+        this.censusFeed.setDesired([...wanted]);
+      }
     } catch { /* observer */ }
   }
 
@@ -1699,7 +1709,7 @@ export class Bot {
     try {
       this.evictBlacklisted(); // marked coins never even get priced, let alone signal
       const mints = [...new Set([...this.watch.keys(), ...this.positions.map(p => p.mint)])];
-      if (!mints.length) { try { await this.outcomeTick(this.now()); } catch { /* observer only */ } try { await this._flowRetryTick(this.now()); } catch { /* record-only retry */ } try { await this._staircaseRetryTick(this.now()); } catch { /* staircase retry */ } try { await this._rangeRetryTick(this.now()); } catch { /* range-live retry */ } try { await this._bottomRetryTick(this.now()); } catch { /* bottom-live retry */ } try { await this._rangeDipTick(this.now()); } catch { /* range dip watch */ } try { await this._walletRetryTick(this.now()); } catch { /* wallet-live retry */ } try { await this._liqRecheckTick(this.now()); } catch { /* liq re-check */ } try { await this.walletWatch.finalizeTick(this.now()); } catch { /* shadow outcomes */ } try { await this.calloutLab.tick(this.now()); } catch { /* shadow callouts */ } try { await this.flowExits.tick(this.now()); } catch { /* shadow flow exits */ } try { await this.structureWatch.tick(this.now()); } catch { /* shadow structure watch */ } try { await this.bottomWatch.tick(this.now()); } catch { /* shadow bottom tracker */ } try { await this.rangeWatch.tick(this.now()); } catch { /* shadow range study */ } try { this._scanSweep(this.now()); } catch { /* scan ledger */ } return; }
+      if (!mints.length) { try { await this.outcomeTick(this.now()); } catch { /* observer only */ } try { await this._flowRetryTick(this.now()); } catch { /* record-only retry */ } try { await this._staircaseRetryTick(this.now()); } catch { /* staircase retry */ } try { await this._rangeRetryTick(this.now()); } catch { /* range-live retry */ } try { await this._bottomRetryTick(this.now()); } catch { /* bottom-live retry */ } try { await this._preEntryTick(this.now()); } catch { /* pre-entry census */ } try { await this._rangeDipTick(this.now()); } catch { /* range dip watch */ } try { await this._walletRetryTick(this.now()); } catch { /* wallet-live retry */ } try { await this._liqRecheckTick(this.now()); } catch { /* liq re-check */ } try { await this.walletWatch.finalizeTick(this.now()); } catch { /* shadow outcomes */ } try { await this.calloutLab.tick(this.now()); } catch { /* shadow callouts */ } try { await this.flowExits.tick(this.now()); } catch { /* shadow flow exits */ } try { await this.structureWatch.tick(this.now()); } catch { /* shadow structure watch */ } try { await this.bottomWatch.tick(this.now()); } catch { /* shadow bottom tracker */ } try { await this.rangeWatch.tick(this.now()); } catch { /* shadow range study */ } try { this._scanSweep(this.now()); } catch { /* scan ledger */ } return; }
       const views = await this.d.fetchViews(mints);
       const n = this.now();
       // D4 (user 2026-10-13): market breadth — the share of sampled coins green on the hour —
@@ -1808,7 +1818,7 @@ export class Bot {
       try { await this.outcomeTick(n); } catch { /* observer only */ }
       try { await this._flowRetryTick(n); } catch { /* record-only retry */ }
       try { await this._staircaseRetryTick(n); } catch { /* staircase retry */ }
-      try { await this._rangeRetryTick(n); } catch { /* range-live retry */ } try { await this._bottomRetryTick(n); } catch { /* bottom-live retry */ } try { await this._rangeDipTick(n); } catch { /* range dip watch */ }
+      try { await this._rangeRetryTick(n); } catch { /* range-live retry */ } try { await this._bottomRetryTick(n); } catch { /* bottom-live retry */ } try { await this._preEntryTick(n); } catch { /* pre-entry census */ } try { await this._rangeDipTick(n); } catch { /* range dip watch */ }
       try { await this._walletRetryTick(n); } catch { /* wallet-live retry */ }
       try { await this._liqRecheckTick(n); } catch { /* liq re-check */ }
       try { await this.walletWatch.finalizeTick(n); } catch { /* shadow outcomes */ }
@@ -2897,7 +2907,93 @@ export class Bot {
     if (this.cfg.baseMode && this._basePulseSkip(v, sig)) return;
     this.lastSignal.set(mint, n);
     console.log(`[bottom] ${v.symbol}: qualified bottom — low ${rec.drawdownPct}% under a $${Math.round(rec.peakMc || 0)} peak, +${rec.pctOffLow}% off the low — BOTTOM LIVE eval`);
+    // PRE-ENTRY CENSUS (owner order 2026-10-18): the buy waits out a
+    // short wallet watch first; a clear puppet tape vetoes it live.
+    // Fail-open — PREENTRY_CENSUS=0 restores the direct route exactly.
+    if (this.cfg.preEntryCensus) { this._startPreEntryWatch(rec, v, sig, n); return; }
     await this.onSignal(v, sig);
+  }
+
+  /** Start a pre-entry census watch for a qualified bottom mark that has
+   *  passed every other guard. The decision lands in _preEntryTick when
+   *  the window closes: veto -> skipped signal journaled with the reason;
+   *  pass -> onSignal with the census read stamped on the signal. One
+   *  watch per mint; a second mark during a watch is the same decision. */
+  _startPreEntryWatch(rec, v, sig, n) {
+    const mint = rec.mint;
+    this.preEntryWatch = this.preEntryWatch || new Map();
+    if (this.preEntryWatch.has(mint)) return;
+    this.stats.preEntry = this.stats.preEntry || { watched: 0, vetoed: 0, passed: 0, thin: 0, cancelled: 0 };
+    this.stats.preEntry.watched++;
+    this.preEntryWatch.set(mint, {
+      rec, sig, view: v, startedAt: n, startPrice: v.price || null,
+      minPrice: v.price || null, endPrice: v.price || null, lastSampleAt: 0,
+      census: newCensus(n), done: false,
+    });
+    console.log(`[preentry] ${v.symbol || mint}: census watch started (${this.cfg.preEntryWindowSec}s) before the bottom buy`);
+    this._syncCensus();
+  }
+
+  /** Pre-entry watch lifecycle: sample the price sparsely during the
+   *  window; at window close, judge the tape and route. Fail-open on
+   *  every error path — a watcher failure routes the ORIGINAL signal
+   *  rather than losing the play. */
+  async _preEntryTick(n) {
+    if (!this.preEntryWatch || !this.preEntryWatch.size) return;
+    const windowMs = this.cfg.preEntryWindowSec * 1000;
+    for (const [mint, w] of [...this.preEntryWatch]) {
+      try {
+        if (w.done) { this.preEntryWatch.delete(mint); continue; }
+        if (this.positions.some(p => p.mint === mint)) {
+          w.done = true; this.preEntryWatch.delete(mint);
+          this.stats.preEntry.cancelled++;
+          this._syncCensus();
+          continue;
+        }
+        if (n - w.startedAt < windowMs) {
+          if (n - w.lastSampleAt >= 20000) {
+            w.lastSampleAt = n;
+            const views = await this.d.fetchViews([mint]).catch(() => null);
+            const fv = views && views.get(mint);
+            if (fv && fv.price > 0) {
+              if (w.minPrice == null || fv.price < w.minPrice) w.minPrice = fv.price;
+              w.endPrice = fv.price;
+            }
+          }
+          continue;
+        }
+        // Window closed — finalize exactly once.
+        w.done = true; this.preEntryWatch.delete(mint);
+        this._syncCensus();
+        const views = await this.d.fetchViews([mint]).catch(() => null);
+        const fv = (views && views.get(mint)) || w.view;
+        if (fv && fv.price > 0) {
+          if (w.minPrice == null || fv.price < w.minPrice) w.minPrice = fv.price;
+          w.endPrice = fv.price;
+        }
+        const win = censusWindow(w.census, n, Math.max(1, n - w.startedAt) + 1000);
+        const res = evaluatePreEntry({ win, startPrice: w.startPrice, minPrice: w.minPrice, endPrice: w.endPrice, cfg: this.cfg });
+        const sig = { ...w.sig, metrics: { ...(w.sig.metrics || {}), preEntry: res.read } };
+        if (res.why === 'thin') this.stats.preEntry.thin++;
+        if (res.veto && this.cfg.preEntryVeto) {
+          this.stats.preEntry.vetoed++;
+          console.log(`[preentry] ${fv.symbol || mint}: VETOED — ${res.why} (buys ${res.read.buys}/sells ${res.read.sells}, uniq ${res.read.uniqBuyers}, drop ${res.read.dropPct}%)`);
+          this.skip(fv, sig, [preEntryReason(res)], [], {});
+          continue;
+        }
+        if (res.veto) sig.metrics.preEntry.wouldVeto = res.why; // veto switch off: stamp the shadow read, buy proceeds
+        this.stats.preEntry.passed++;
+        console.log(`[preentry] ${fv.symbol || mint}: passed (${res.why}) — routing the bottom buy`);
+        await this.onSignal(fv, sig);
+      } catch (e) {
+        // Fail-open: never let a watcher bug eat a qualified play.
+        this.err('preEntryTick', e);
+        if (!w.done) {
+          w.done = true; this.preEntryWatch.delete(mint);
+          try { await this.onSignal(w.view, w.sig); } catch { /* routing has its own guards */ }
+        }
+      }
+    }
   }
 
   /** A bottom mark whose mint had no market view at fire time: queue it
