@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   StructureWatch, findConfirmedSwings, detectHigherLows, scoreMark, completedCandles,
-  buildStructureCard, foldStructureJournal, pickTrendSeeds, STRUCTURE_MAX_WATCHES,
+  buildStructureCard, foldStructureJournal, pickTrendSeeds, STRUCTURE_MAX_WATCHES, STRUCTURE_TREND_RESERVE,
 } from '../src/structureWatch.js';
 import { Journal } from '../src/journal.js';
 import { Bot } from '../src/bot.js';
@@ -423,4 +423,19 @@ test('trend seeds: seedSource stamps the seed, its marks, and the card tally —
   const card = h.sw.scorecard();
   assert.deepEqual(card.seedSources, { signal: 1, trending: 1 });
   assert.equal(card.recentMarks.find(m => m.mint === MINT).seedSource, 'trending');
+});
+
+test('trend seeds: the reserve slice lets trending seeds land past the signal cap — and only trending seeds', () => {
+  const dir = tmp();
+  const h = harness(dir);
+  for (let i = 0; i < STRUCTURE_MAX_WATCHES; i++) {
+    assert.ok(h.sw.seed(sigRec({ id: `sig-${i}`, mint: `Mint${i}XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX` })), `signal seed ${i} accepted`);
+  }
+  assert.equal(h.sw.seed(sigRec({ id: 'sig-over', mint: 'MintOverXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX' })), null, 'signal seeds stop at the shared cap');
+  const trendRec = (i) => ({ ts: T0, mint: `Trend${i}XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`, symbol: 'TRD', setup: 'trending', decision: 'seed', seedSource: 'trending', mc: 60000, price: 1 });
+  for (let i = 0; i < STRUCTURE_TREND_RESERVE; i++) {
+    assert.ok(h.sw.seed(trendRec(i), { reserve: STRUCTURE_TREND_RESERVE }), `trending seed ${i} lands inside the reserve`);
+  }
+  assert.equal(h.sw.seed(trendRec(99), { reserve: STRUCTURE_TREND_RESERVE }), null, 'the reserve is a cap too, not a bypass');
+  assert.equal(h.sw.active.size, STRUCTURE_MAX_WATCHES + STRUCTURE_TREND_RESERVE);
 });

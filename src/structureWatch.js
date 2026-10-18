@@ -34,6 +34,7 @@ import { fetchHolderCount } from './gate.js';
 
 const GT = 'https://api.geckoterminal.com/api/v2';
 export const STRUCTURE_MAX_WATCHES = 30;      // concurrent watch cap — beyond it seeds are skipped + counted
+export const STRUCTURE_TREND_RESERVE = 6;     // extra slots reserved for trending seeds (owner order 2026-10-18): the signal funnel refills freed slots within seconds, so without a reserve the trending supply line would land ~never; trending seeds may fill up to MAX + RESERVE, signal seeds never pass MAX
 export const STRUCTURE_WATCH_MS = 4 * 3600e3; // a watch lives at most 4h from its seed
 export const STRUCTURE_SAMPLE_MS = 5 * 60000; // per-watch sampling cadence (~every 5 min)
 const CANDLE_MS = 5 * 60000;                  // 5m candles
@@ -358,13 +359,17 @@ export class StructureWatch {
    *  Journal.signal() funnel via a Bot-wired callback). Synchronous claim —
    *  the active-mint set is updated before any await — so two signals in
    *  the same tick can never double-seed a mint. Returns the seed record,
-   *  or null when the mint is already watched or the cap is full (counted). */
-  seed(rec) {
+   *  or null when the mint is already watched or the cap is full (counted).
+   *  opts.reserve widens the cap by that many slots for this call — the
+   *  trending seeder's reserved slice; the caller owns the per-source
+   *  accounting (how many of ITS watches are active), seed() owns the cap. */
+  seed(rec, opts = {}) {
     try {
       if (!rec || !rec.mint) return null;
       if (this.activeMint.has(rec.mint)) return null;
       const ts = rec.ts || this.now();
-      if (this.active.size >= STRUCTURE_MAX_WATCHES) {
+      const cap = STRUCTURE_MAX_WATCHES + (opts.reserve > 0 ? opts.reserve : 0);
+      if (this.active.size >= cap) {
         this.stats.skippedCap++;
         this._append({ type: 'skip', ts, mint: rec.mint, setup: rec.setup || null, reason: 'cap' });
         return null;

@@ -21,7 +21,7 @@ import { Risk } from './risk.js';
 import { postCallout } from './callout.js';
 import { CalloutLab } from './calloutLab.js';
 import { FlowExits } from './flowExits.js';
-import { StructureWatch, pickTrendSeeds, STRUCTURE_MAX_WATCHES } from './structureWatch.js';
+import { StructureWatch, pickTrendSeeds, STRUCTURE_MAX_WATCHES, STRUCTURE_TREND_RESERVE } from './structureWatch.js';
 import { StaircaseSignal } from './staircaseSignal.js';
 import { BottomWatch } from './bottomWatch.js';
 import { RangeWatch } from './rangeWatch.js';
@@ -1480,13 +1480,19 @@ export class Bot {
       if (!this._trendSeedHour || this._trendSeedHour.key !== hourKey) this._trendSeedHour = { key: hourKey, count: 0 };
       const budget = (this.cfg.structureTrendSeedPerHour || 0) - this._trendSeedHour.count;
       if (budget <= 0) return;
-      const room = STRUCTURE_MAX_WATCHES - this.structureWatch.active.size;
+      // Room = the reserved trending slice: the signal funnel refills
+      // freed slots within seconds (first live read: watch pinned at
+      // 30/30, zero trending seeds), so trending seeds get RESERVE slots
+      // of their own on top of the shared cap — never evicting a signal
+      // watch, never exceeding MAX + RESERVE total.
+      let trendActive = 0;
+      for (const w of this.structureWatch.active.values()) if (w.rec && w.rec.seedSource === 'trending') trendActive++;
+      const room = Math.min(STRUCTURE_TREND_RESERVE - trendActive, STRUCTURE_MAX_WATCHES + STRUCTURE_TREND_RESERVE - this.structureWatch.active.size);
       if (room <= 0) return;
       const picks = pickTrendSeeds(rows, { minMc: this.cfg.structureSeedMinMc || 0, limit: Math.min(budget, room), exclude: new Set(this.structureWatch.activeMint.keys()) });
       for (const p of picks) {
         if (bl && bl.has(p.mint)) continue;
-        if (this.structureWatch.active.size >= STRUCTURE_MAX_WATCHES) break;
-        const rec = this.structureWatch.seed({ ts: n, mint: p.mint, symbol: p.symbol, mc: p.mc, price: p.price, setup: 'trending', decision: 'seed', seedSource: 'trending' });
+        const rec = this.structureWatch.seed({ ts: n, mint: p.mint, symbol: p.symbol, mc: p.mc, price: p.price, setup: 'trending', decision: 'seed', seedSource: 'trending' }, { reserve: STRUCTURE_TREND_RESERVE });
         if (rec) this._trendSeedHour.count++;
       }
     } catch { /* observer only — never disturb discovery */ }
