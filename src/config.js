@@ -55,6 +55,8 @@ export function loadConfig(env = process.env) {
     // held the ~10 that fired; the other ~750 evaporated with the in-memory
     // history. Nothing in trading reads the ledger. 0 disables it entirely.
     scanLedger: num(env, 'SCAN_LEDGER', 1),                 // 1 = scan ledger on
+    archiveRotate: num(env, 'ARCHIVE_ROTATE', 1),           // 1 = journal archive rotation on (owner order 2026-10-18 after the boot-OOM outage): finalized records older than archiveHotDays are gzip-filed to <dataDir>/archive; 0 = off
+    archiveHotDays: num(env, 'ARCHIVE_HOT_DAYS', 7),        // days of journal history kept in the hot files; older finalized records are archived (never deleted)
     scanSessionIdleSec: num(env, 'SCAN_SESSION_IDLE_SEC', 600), // a watch session finalizes after this long with no fresh view (or at 3h old)
     scanStamps: num(env, 'SCAN_STAMPS', 1),                 // 1 = per-setup evaluation verdicts (judgeScan) stamped on scan-ledger sessions — record-only instrumentation; 0 = session records exactly as before stamps shipped
     // Shadow Seller (user order 2026-10-16, RECORD-ONLY): a LEARNED exit judge
@@ -773,6 +775,7 @@ export function validateConfig(cfg) {
   if (cfg.tradeSol <= 0) errs.push('TRADE_SOL must be > 0');
   if (cfg.tradeSol > 0.25 && !cfg.allowLarge) errs.push(`TRADE_SOL=${cfg.tradeSol} looks like a typo (>0.25). Set ALLOW_LARGE=1 if intentional.`);
   if (cfg.maxPositions < 1 || cfg.maxPositions > 10) errs.push('MAX_POSITIONS must be 1..10');
+  if (cfg.archiveHotDays < 1) errs.push('ARCHIVE_HOT_DAYS must be >= 1');
   if (cfg.slot2Sol < 0) errs.push('SLOT2_SOL must be >= 0 (0 = off)');
   if (cfg.dailyLossSol < 0) errs.push('DAILY_LOSS_SOL must be >= 0 (0 = disabled)');
   if (cfg.haltAfterCloses < 0) errs.push('HALT_AFTER_CLOSES must be >= 0');

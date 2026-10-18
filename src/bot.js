@@ -27,6 +27,7 @@ import { BottomWatch } from './bottomWatch.js';
 import { RangeWatch } from './rangeWatch.js';
 import { ConfluenceSignal } from './confluenceSignal.js';
 import { ScanLab, buildScanCard } from './scanLab.js';
+import { rotateJournalSet } from './archive.js';
 import { ShadowSeller } from './shadowSeller.js';
 import { NeverGreenCut } from './neverGreen.js';
 import { snapshotFeatures, externalExit } from './learn.js';
@@ -382,7 +383,32 @@ export class Bot {
   err(where, e) { this.stats.errors++; this.stats.lastError = `${where}: ${e && e.message ? e.message : e}`; }
 
   // ------------------------------------------------------------ boot
+  /**
+   * Journal archive rotation (owner order 2026-10-18): file finalized
+   * records older than cfg.archiveHotDays into <dataDir>/archive/*.gz so
+   * the hot journal files stay lean (the 2026-10-18 boot-OOM lesson).
+   * NEVER rotated: feedback (the user's marks), manual exits (the
+   * learning set), resignal/ratchet shadow files (small, dedupe-critical)
+   * and outcome_pending.json (live state). Runs at boot and daily.
+   */
+  async _rotateArchives(reason) {
+    if (!this.cfg.archiveRotate || this._rotating) return;
+    this._rotating = true;
+    try {
+      const skip = new Set([this.journal.f.fb, this.journal.f.manual, this.journal.f.rsig, this.journal.f.rshadow, this.journal.f.pend]);
+      const files = [...new Set([...Object.values(this.journal.f), this.walletWatch && this.walletWatch.file, this.scanLab && this.scanLab.file].filter(f => f && !skip.has(f)))];
+      const archiveDir = path.join(this.journal.dir, 'archive');
+      const { summary, manifest } = await rotateJournalSet(files, { hotDays: this.cfg.archiveHotDays, now: this.now(), archiveDir, log: console.log });
+      this.archiveStats = { hotDays: this.cfg.archiveHotDays, lastRunTs: this.now(), lastReason: reason, lastArchived: summary.archived, files: manifest.files };
+      console.log(`[archive] rotation (${reason}): ${summary.archived} records filed across ${summary.files} files, ${summary.kept} kept hot`);
+    } catch (e) { this.err('archive', e); }
+    this._rotating = false;
+  }
+
   async start() {
+    await this._rotateArchives('boot');
+    const t = setInterval(() => { this._rotateArchives('daily').catch(() => {}); }, 24 * 3600 * 1000);
+    if (t.unref) t.unref();
     const sol = await this.exec.solBalance();
     this.risk.initEquity(sol);
     // real mode: drop positions whose tokens are no longer in the wallet (sold/transferred outside the bot)
@@ -4358,6 +4384,7 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
       flowConfirm: this._flowConfirmState(),
       grindJudge: this._grindJudgeState(),
       census: this.stats.census || null,
+      archive: this.archiveStats || null,
       watchlist: this.watch.size,
       pairedShadow: this.paired ? { pending: this.paired.pending.size, done: this.paired.done.length } : { pending: 0, done: 0 },
       positions: this.positions.map(p => ({ id: p.id, symbol: p.symbol, mint: p.mint, setup: p.setup, entrySol: p.entrySol, remainingFrac: p.remainingFrac, peakRatio: +(p.peakRatio || 1).toFixed(2), heldMin: +((this.now() - p.entryTs) / 60000).toFixed(1), simulated: p.simulated, noTp: !!p.noTp, protected: p.protected || null, takenOver: p.takenOver || null, tp1AtPct: p.tp1AtPct ?? null, path: p.pathClass || null, stallPending: p.stallPending ?? null, bagDeadWaves: p.bagDeadWaves ?? null, ddVitals: p.ddVitals ?? null, fakeAlive: fakeAliveStamp(p), census: censusStamp(p, this.now(), this.cfg.censusWindowMin * 60000) })),
