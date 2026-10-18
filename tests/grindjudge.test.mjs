@@ -83,7 +83,8 @@ test('config: grind judge defaults — module on, live OFF until GRIND_JUDGE_LIV
   assert.equal(loadConfig({ GRIND_JUDGE_LIVE: '1' }).grindJudgeLive, true);
   assert.equal(loadConfig({ GRIND_JUDGE: '0' }).grindJudge, false);
   assert.equal(c.grindFaShare, 0.30);
-  assert.equal(c.grindMaxUniqBuyers, 4);
+  assert.equal(c.grindMaxUniqBuyers, 12);
+  assert.equal(c.grindMaxNewBuyers, 10);
   assert.equal(c.grindKillN, 10);
   assert.equal(c.grindKillWrong, 6);
 });
@@ -105,8 +106,8 @@ test('evaluateGrind: every leg vetoes on its own', () => {
     [{ cenWin: null }, 'census-dark'],
     [{ censusAgeMs: 599_999 }, 'census-young'],
     [{ cenWin: { buys: 7, sells: 5, uniqBuyers: 3, newBuyers: 0 } }, 'tape-quiet'],
-    [{ cenWin: { buys: 20, sells: 5, uniqBuyers: 5, newBuyers: 0 } }, 'buyers-alive'],
-    [{ cenWin: { buys: 20, sells: 5, uniqBuyers: 3, newBuyers: 1 } }, 'new-arriving'],
+    [{ cenWin: { buys: 20, sells: 5, uniqBuyers: 13, newBuyers: 0 } }, 'buyers-alive'],
+    [{ cenWin: { buys: 20, sells: 5, uniqBuyers: 3, newBuyers: 11 } }, 'new-arriving'],
   ];
   for (const [over, why] of cases) {
     const out = evaluateGrind({ ...HOT_IN, ...over });
@@ -197,11 +198,12 @@ test('rescue: price recovers over the underwater bar inside the confirm — pend
   assert.ok(grindRecords(rig).some(r => r.type === 'grindCancel' && r.why === 'not-underwater'));
 });
 
-test('rescue: one genuinely new buyer arriving inside the confirm cancels the fire', async () => {
-  const rig = pipelineRig({ cfgOver: { grindJudgeLive: true } });
+test('rescue: a genuine inflow of new buyers (>10, the retuned band) inside the confirm cancels the fire', async () => {
+  // uniq gate lifted in this rig so the new-arriving leg is the one that trips
+  const rig = pipelineRig({ cfgOver: { grindJudgeLive: true, grindMaxUniqBuyers: 99 } });
   const { pos, v } = await openPop(rig);
   await grindToHot(rig, pos, v);
-  fold(rig, 'D');
+  for (let i = 1; i <= 11; i++) fold(rig, 'D' + i);
   await drive(rig, pos, v, { ratio: 0.66 });
   assert.equal(pos.grindPendingSince, null);
   assert.equal(rig.bot.positions.length, 1, 'still held — a real bid showed up');

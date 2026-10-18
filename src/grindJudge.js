@@ -53,7 +53,7 @@ export function evaluateGrind({ cfg, ageSec, ratio, faWin, cenWin, censusAgeMs }
   if (censusAgeMs != null && censusAgeMs < cfg.censusWindowMin * 60000) return no('census-young');
   if (cenWin.buys < cfg.grindMinBuysWindow) return no('tape-quiet');
   if (cenWin.uniqBuyers > cfg.grindMaxUniqBuyers) return no('buyers-alive');
-  if (cenWin.newBuyers > 0) return no('new-arriving');
+  if (cenWin.newBuyers > cfg.grindMaxNewBuyers) return no('new-arriving');
   return { hot: true, why: 'hot' };
 }
 

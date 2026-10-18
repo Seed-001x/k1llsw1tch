@@ -647,7 +647,8 @@ export function loadConfig(env = process.env) {
     grindFaWindowMin: num(env, 'GRIND_FA_WINDOW_MIN', 30),
     grindFaMinSamples: num(env, 'GRIND_FA_MIN_SAMPLES', 30),
     grindMinBuysWindow: num(env, 'GRIND_MIN_BUYS_WINDOW', 8),
-    grindMaxUniqBuyers: num(env, 'GRIND_MAX_UNIQ_BUYERS', 4),
+    grindMaxUniqBuyers: num(env, 'GRIND_MAX_UNIQ_BUYERS', 12), // retuned 2026-10-18 (owner pick from the calibration backtest): the archetype grind's unique buyers floor at 7 on hot minutes (median 15); 4 could never fire. Winner control never went below 38.
+    grindMaxNewBuyers: num(env, 'GRIND_MAX_NEW_BUYERS', 10),   // retuned 2026-10-18 (owner pick): was a hardcoded ==0 gate, which bot-supported grinds never satisfy (archetype floor 5, median 17 on hot minutes)
     grindConfirmSec: num(env, 'GRIND_CONFIRM_SEC', 120),
     grindKillN: num(env, 'GRIND_KILL_N', 10),
     grindKillWrong: num(env, 'GRIND_KILL_WRONG', 6),
