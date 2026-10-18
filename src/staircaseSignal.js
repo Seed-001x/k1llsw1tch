@@ -50,6 +50,7 @@ export function staircaseRecordOf(mark) {
     type: 'staircase_signal',
     ts: mark.ts, mint: mark.mint ?? null, symbol: mark.symbol ?? null,
     watchId: mark.watchId ?? null, markId: mark.markId, ordinal: mark.ordinal,
+    seedSource: mark.seedSource ?? 'signal',
     price: mark.price ?? null, lowPrev: mark.lowPrev ?? null, lowNew: mark.lowNew ?? null,
   };
 }

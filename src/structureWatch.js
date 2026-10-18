@@ -50,6 +50,27 @@ const CARD_CACHE_MS = 60000;
 
 /** Only candles whose 5m window has FULLY closed by nowMs may inform any
  *  decision. Returns them ascending. */
+/** Trending-seed picker (owner order 2026-10-18 — the structure watch's
+ *  second supply line): from one scraped trending-list page, choose the
+ *  rows worth seeding — a mint, a readable market cap at/above the floor
+ *  (a row whose cap can't be read is skipped: the floor must be verified,
+ *  not assumed), deduped within the page, capped at `limit`. Pure — the
+ *  Bot owns the hourly budget, the watch-cap headroom and the seeding. */
+export function pickTrendSeeds(rows, { minMc = 0, limit = Infinity } = {}) {
+  const out = [];
+  const seen = new Set();
+  for (const row of rows || []) {
+    if (out.length >= limit) break;
+    const mint = row && (row.mint || row.address);
+    if (!mint || seen.has(mint)) continue;
+    const mc = row.usd_market_cap ?? row.market_cap ?? row.mc ?? null;
+    if (mc == null || !Number.isFinite(mc) || mc < minMc) continue;
+    seen.add(mint);
+    out.push({ mint, symbol: row.symbol || row.name || null, mc, price: row.price ?? row.usd_price ?? null });
+  }
+  return out;
+}
+
 export function completedCandles(candles, nowMs) {
   return (candles || [])
     .filter(c => c && Number.isFinite(c[0]) && (c[0] * 1000 + CANDLE_MS) <= nowMs)
@@ -174,6 +195,7 @@ export function buildStructureCard(records) {
   const recentMarks = [...joined].sort((a, b) => b.m.ts - a.m.ts).slice(0, 10).map(({ m, score }) => ({
     markId: m.markId, watchId: m.watchId, ts: m.ts, mint: m.mint || null,
     symbol: m.symbol != null ? m.symbol : ((f.seeds.get(m.watchId) || {}).symbol ?? null),
+    seedSource: m.seedSource ?? ((f.seeds.get(m.watchId) || {}).seedSource ?? null),
     ordinal: m.ordinal, price: m.price ?? null, lowPrev: m.lowPrev ?? null, lowNew: m.lowNew ?? null,
     holdersAtSeed: m.holdersAtSeed ?? null, holdersAtMark: m.holdersAtMark ?? null, holderGrowthPct: m.holderGrowthPct ?? null,
     score: score ? {
@@ -181,9 +203,12 @@ export function buildStructureCard(records) {
       peakPct: score.peakPct ?? null, worstDipPct: score.worstDipPct ?? null, final: !!score.final,
     } : null,
   }));
+  const seedSources = {};
+  for (const s of f.seeds.values()) { const k = s.seedSource || 'signal'; seedSources[k] = (seedSources[k] || 0) + 1; }
   return {
     watching: [...f.seeds.keys()].filter(id => !f.ends.has(id)).length,
     watchedTotal: f.seeds.size,
+    seedSources,
     ended: f.ends.size,
     samples: f.samples,
     holderSamples: f.holderSamples,
@@ -347,6 +372,7 @@ export class StructureWatch {
       const srec = {
         type: 'seed', watchId, ts, signalId: rec.id || null, mint: rec.mint,
         symbol: rec.symbol || null, setup: rec.setup || null, decision: rec.decision || null,
+        seedSource: rec.seedSource || 'signal',
         mc: rec.mc ?? null, price: rec.price ?? null,
       };
       const w = this._newWatch(srec);
@@ -440,7 +466,7 @@ export class StructureWatch {
       const rec = {
         type: 'mark', markId, watchId: w.rec.watchId, ordinal: w.ordinal,
         ts: m.ts, price: m.price, lowPrev: m.lowPrev, lowNew: m.lowNew, lowTs: m.lowTs,
-        mint: w.rec.mint, symbol: w.rec.symbol,
+        mint: w.rec.mint, symbol: w.rec.symbol, seedSource: w.rec.seedSource || 'signal',
         holdersAtMark: holdersAtMark ?? null, holdersAtSeed: w.holdersAtSeed ?? null, holderGrowthPct: growth,
       };
       w.marks.set(markId, rec);

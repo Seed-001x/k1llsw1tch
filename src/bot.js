@@ -21,7 +21,7 @@ import { Risk } from './risk.js';
 import { postCallout } from './callout.js';
 import { CalloutLab } from './calloutLab.js';
 import { FlowExits } from './flowExits.js';
-import { StructureWatch } from './structureWatch.js';
+import { StructureWatch, pickTrendSeeds, STRUCTURE_MAX_WATCHES } from './structureWatch.js';
 import { StaircaseSignal } from './staircaseSignal.js';
 import { BottomWatch } from './bottomWatch.js';
 import { RangeWatch } from './rangeWatch.js';
@@ -1458,6 +1458,34 @@ export class Bot {
     await this.onSignal(v, sig);
   }
 
+  // TRENDING SEEDING (owner order 2026-10-18 18:54 EDT): offer the scraped
+  // trending list to the structure watch — its second supply line, so a
+  // coin climbing quietly can become a staircase candidate without first
+  // doing something loud. Guarded hard: kill switch, free watch slots
+  // only (signal seeds are never crowded out — the headroom check runs
+  // before every seed call, so the watch's own cap-skip journal stays
+  // silent), an hourly budget, the mc floor inside pickTrendSeeds, and
+  // the blacklist. Fail-silent: an observer seam can never disturb
+  // discovery.
+  _seedStructureFromTrending(rows, n, bl) {
+    try {
+      if (!(this.cfg.structureTrendSeed > 0) || !this.structureWatch) return;
+      const hourKey = Math.floor(n / 3600000);
+      if (!this._trendSeedHour || this._trendSeedHour.key !== hourKey) this._trendSeedHour = { key: hourKey, count: 0 };
+      const budget = (this.cfg.structureTrendSeedPerHour || 0) - this._trendSeedHour.count;
+      if (budget <= 0) return;
+      const room = STRUCTURE_MAX_WATCHES - this.structureWatch.active.size;
+      if (room <= 0) return;
+      const picks = pickTrendSeeds(rows, { minMc: this.cfg.structureSeedMinMc || 0, limit: Math.min(budget, room) });
+      for (const p of picks) {
+        if (bl && bl.has(p.mint)) continue;
+        if (this.structureWatch.active.size >= STRUCTURE_MAX_WATCHES) break;
+        const rec = this.structureWatch.seed({ ts: n, mint: p.mint, symbol: p.symbol, mc: p.mc, price: p.price, setup: 'trending', decision: 'seed', seedSource: 'trending' });
+        if (rec) this._trendSeedHour.count++;
+      }
+    } catch { /* observer only — never disturb discovery */ }
+  }
+
   async discoverTick() {
     if (this.busy.discover) return;
     this.busy.discover = true;
@@ -1474,6 +1502,7 @@ export class Bot {
           const mint = row.mint || row.address;
           if (mint && !bl.has(mint) && !this.watch.has(mint)) { this.watch.set(mint, { ts: n, source: 'reallists' }); reallistsAdded++; }
         }
+        this._seedStructureFromTrending(rl.trending || [], n, bl);
       } catch {}
       this.evictBlacklisted();
       this.stats.sourceCounts = found.counts || {};
@@ -1957,7 +1986,11 @@ export class Bot {
   // stops. Returns true when the candidate was pulse-skipped. Callers
   // gate on cfg.baseMode — BASE_MODE=0 leaves every path untouched.
   _basePulseSkip(v, sig) {
-    const floor = this.cfg.baseMinVolM5;
+    // Staircase evals judge against their own floor (owner order
+    // 2026-10-18: BASE_STAIRCASE_MIN_VOL_M5, default 0 = exempt — the
+    // mark's structure is its aliveness proof); every other base shape
+    // uses the shared floor.
+    const floor = sig && sig.setup === 'staircase' ? this.cfg.baseStaircaseMinVolM5 : this.cfg.baseMinVolM5;
     if (!(floor > 0)) return false;
     const vol = v && Number.isFinite(v.volM5) ? v.volM5 : null;
     if (vol != null && vol >= floor) return false;
@@ -2558,7 +2591,7 @@ export class Bot {
     this.latest.set(mint, v); this.latestAt.set(mint, n); this.history.record(v, n);
     if (this.positions.some(p => p.mint === mint)) return; // already holding — the shadow record carries the mark; nothing to decide
     if (n - (this.lastSignal.get(mint) || 0) < this.cfg.signalCooldownMin * 60000) return; // signaled moments ago — the mark's shadow record is the trace; no re-judge spam
-    const metrics = { staircase: { ordinal: rec.ordinal, markId: rec.markId || null, watchId: rec.watchId || null, markPrice: rec.price ?? null, lowPrev: rec.lowPrev ?? null, lowNew: rec.lowNew ?? null } };
+    const metrics = { staircase: { ordinal: rec.ordinal, markId: rec.markId || null, watchId: rec.watchId || null, markPrice: rec.price ?? null, lowPrev: rec.lowPrev ?? null, lowNew: rec.lowNew ?? null, seedSource: rec.seedSource || 'signal' } };
     const sig = { setup: 'staircase', strength: rec.ordinal, metrics };
     if (liqRechecks > 0) sig.liqRechecks = liqRechecks;
     // BASE MODE (owner order 2026-10-16): a staircase higher low is one

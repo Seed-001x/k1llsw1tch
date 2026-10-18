@@ -160,6 +160,28 @@ export function loadConfig(env = process.env) {
     // enrollment map restores at boot from the signals journal). A
     // base alone is not a nomination.
     baseMinVolM5: num(env, 'BASE_MIN_VOL_M5', 5000),         // pulse floor for base-shape entries, USD 5m volume (0 = floor off)
+    // STAIRCASE PULSE EXEMPTION (owner order 2026-10-18 18:54 EDT, after the
+    // skipped-marks study: 208 staircase evals pulse-skipped in one day vs 1
+    // taken; a forward-scored sample of the skipped marks ran a median +21%
+    // peak with only 8% cratering — the uniform floor separates LOUD from
+    // QUIET, not good from bad, and a staircase mark's aliveness proof is
+    // the hours of confirmed structure behind it, not 5 loud minutes).
+    // Staircase evals use THIS floor instead of baseMinVolM5; 0 = exempt.
+    // Bottom and range keep the $5,000 floor — dumping coins generate
+    // plenty of volume, and for those doors the floor does real work.
+    baseStaircaseMinVolM5: num(env, 'BASE_STAIRCASE_MIN_VOL_M5', 0), // pulse floor for staircase entries only, USD 5m volume (0 = exempt)
+    // TRENDING SEEDING (owner order 2026-10-18 18:54 EDT): the structure
+    // watch was only ever seeded by journaled signals, so a coin had to do
+    // something loud before it could become a staircase candidate — quiet
+    // climbs never entered the universe. The discovery tick now also seeds
+    // the watch from the scraped trending list (the left-side coins sit on
+    // that page for their whole climb): mc at/above the floor, an hourly
+    // seed budget, and only into free watch slots. Seeds and their marks
+    // carry seedSource ('signal' | 'trending') so the staircase study can
+    // split the cohorts and prove the new supply line's quality.
+    structureTrendSeed: num(env, 'STRUCTURE_TREND_SEED', 1),        // 1 = seed the structure watch from the trending list (0 = signal-seeded only, the old universe)
+    structureSeedMinMc: num(env, 'STRUCTURE_SEED_MIN_MC', 25000),   // trending-seed market-cap floor, USD
+    structureTrendSeedPerHour: num(env, 'STRUCTURE_TREND_SEED_PER_HOUR', 12), // hourly budget of trending seeds
     enrollTtlH: num(env, 'ENROLL_TTL_H', 24),                // hours a demotion enrollment nominates a mint for range entries
     // Confluence Shadow Signal (user order 2026-10-16, RECORD-ONLY): every
     // walletWatch confluence fire ALSO opens two virtual positions stamped
@@ -964,6 +986,10 @@ export function validateConfig(cfg) {
   if (!(cfg.flowConfirmMaxEntries >= 1)) errs.push('FLOW_CONFIRM_MAX_ENTRIES must be >= 1');
   if (!(cfg.flowConfirmKillN >= 1)) errs.push('FLOW_CONFIRM_KILL_N must be >= 1');
   if (!(cfg.baseMinVolM5 >= 0)) errs.push('BASE_MIN_VOL_M5 must be >= 0 (USD)');
+  if (!(cfg.baseStaircaseMinVolM5 >= 0)) errs.push('BASE_STAIRCASE_MIN_VOL_M5 must be >= 0 (USD)');
+  if (cfg.structureTrendSeed < 0 || cfg.structureTrendSeed > 1) errs.push('STRUCTURE_TREND_SEED must be 0 or 1');
+  if (!(cfg.structureSeedMinMc >= 0)) errs.push('STRUCTURE_SEED_MIN_MC must be >= 0 (USD)');
+  if (!(cfg.structureTrendSeedPerHour >= 0)) errs.push('STRUCTURE_TREND_SEED_PER_HOUR must be >= 0');
   if (!(cfg.enrollTtlH > 0) || cfg.enrollTtlH > 720) errs.push('ENROLL_TTL_H must be between 0 and 720 (hours)');
   if (cfg.confluenceSignal < 0 || cfg.confluenceSignal > 1) errs.push('CONFLUENCE_SIGNAL must be 0 or 1');
   if (cfg.confluenceScalpPct <= 0 || cfg.confluenceScalpPct > 2) errs.push('CONFLUENCE_SCALP_PCT must be between 0 and 2');

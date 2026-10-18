@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   StructureWatch, findConfirmedSwings, detectHigherLows, scoreMark, completedCandles,
-  buildStructureCard, foldStructureJournal, STRUCTURE_MAX_WATCHES,
+  buildStructureCard, foldStructureJournal, pickTrendSeeds, STRUCTURE_MAX_WATCHES,
 } from '../src/structureWatch.js';
 import { Journal } from '../src/journal.js';
 import { Bot } from '../src/bot.js';
@@ -381,4 +381,42 @@ test('structure: HTTP GET /structurewatch serves the empty-state card on a fresh
     assert.equal(card.ready, false);
     assert.deepEqual(card.recentMarks, []);
   } finally { srv.close(); }
+});
+
+// ---- trending seeding (owner order 2026-10-18): the watch's second supply line ----
+test('trend seeds: pickTrendSeeds keeps only readable caps at/above the floor, dedupes, and caps', () => {
+  const rows = [
+    { mint: 'A', symbol: 'AAA', usd_market_cap: 40_000, price: 0.001 },
+    { mint: 'B', symbol: 'BBB', usd_market_cap: 10_000 },              // below the floor
+    { mint: 'C', symbol: 'CCC' },                                       // cap unreadable — the floor must be verified, not assumed
+    { address: 'D', name: 'DDD', market_cap: 25_000 },                  // floor edge + field fallbacks
+    { mint: 'A', symbol: 'AAA', usd_market_cap: 41_000 },               // duplicate mint
+    { mint: 'E', symbol: 'EEE', mc: 900_000 },
+  ];
+  const picks = pickTrendSeeds(rows, { minMc: 25_000, limit: 10 });
+  assert.deepEqual(picks.map(p => p.mint), ['A', 'D', 'E']);
+  assert.equal(picks[0].mc, 40_000);
+  assert.equal(picks[1].symbol, 'DDD');
+  assert.deepEqual(pickTrendSeeds(rows, { minMc: 25_000, limit: 2 }).map(p => p.mint), ['A', 'D']);
+  assert.deepEqual(pickTrendSeeds(rows, { minMc: 0, limit: 10 }).map(p => p.mint), ['A', 'B', 'D', 'E']); // C still out: no cap at any floor
+  assert.deepEqual(pickTrendSeeds(null, { minMc: 0 }), []);
+});
+
+test('trend seeds: seedSource stamps the seed, its marks, and the card tally — signal seeds default to signal', async () => {
+  const dir = tmp();
+  const h = harness(dir);
+  h.series = mkCandles(STAIRS);
+  const plain = h.sw.seed(sigRec({ mint: 'MintSignalXXXXXXXXXXXXXXXXXXXXXXXXXXXXX' }));
+  assert.equal(plain.seedSource, 'signal');
+  const trend = h.sw.seed({ ts: T0, mint: MINT, symbol: 'TRD', setup: 'trending', decision: 'seed', seedSource: 'trending', mc: 60_000, price: 1.12 });
+  assert.equal(trend.seedSource, 'trending');
+  for (let t = T0 + 6 * MIN; t <= T0 + 48 * MIN; t += 6 * MIN) { h.setT(t); await h.sw.tick(t); }
+  await flush();
+  const rows = readSw(dir);
+  const marks = rows.filter(r => r.type === 'mark' && r.mint === MINT);
+  assert.ok(marks.length >= 1);
+  assert.equal(marks[0].seedSource, 'trending');
+  const card = h.sw.scorecard();
+  assert.deepEqual(card.seedSources, { signal: 1, trending: 1 });
+  assert.equal(card.recentMarks.find(m => m.mint === MINT).seedSource, 'trending');
 });

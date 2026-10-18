@@ -483,20 +483,35 @@ test('pulse floor: an UNKNOWN volM5 counts as dead — skips, journaled as unkno
   assert.equal(bot.stats.baseMode.pulseSkips.total, 1);
 });
 
-test('pulse floor: staircase and bottom evals carry the same gate (their marks nominate; the tape must still be alive)', async () => {
-  const srig = rangeRig({ staircaseLive: 1 });
-  srig.views.set('MINTS', view({ address: 'MINTS', symbol: 'STAIR', volM5: 300 }));
-  srig.bot._evalStaircase({ type: 'mark', ts: T0, mint: 'MINTS', symbol: 'STAIR', watchId: 'sw-1', markId: 'sw-1-m3', ordinal: 3, price: 1, lowPrev: 0.9, lowNew: 0.95 });
-  await flush();
-  assert.equal(srig.calls.length, 0);
-  assert.equal(srig.bot.stats.baseMode.pulseSkips.bySetup.staircase, 1);
-
+test('pulse floor: the bottom eval carries the gate (its marks nominate; the tape must still be alive)', async () => {
   const brig = bottomRig();
   brig.views.set('MINTB', view({ address: 'MINTB', symbol: 'BOTM', volM5: 100 }));
   brig.bot._evalBottom(BMARK);
   await flush();
   assert.equal(brig.calls.length, 0);
   assert.equal(brig.bot.stats.baseMode.pulseSkips.bySetup.bottom, 1);
+});
+
+test('pulse floor: staircase evals are EXEMPT at the default dial (owner order 2026-10-18 — the mark’s structure is its aliveness proof)', async () => {
+  const srig = rangeRig({ staircaseLive: 1 });
+  srig.views.set('MINTS', view({ address: 'MINTS', symbol: 'STAIR', volM5: 300 }));
+  srig.bot._evalStaircase({ type: 'mark', ts: T0, mint: 'MINTS', symbol: 'STAIR', watchId: 'sw-1', markId: 'sw-1-m3', ordinal: 3, price: 1, lowPrev: 0.9, lowNew: 0.95 });
+  await flush();
+  assert.equal(srig.bot.stats.baseMode.pulseSkips.bySetup.staircase, undefined, 'no staircase pulse skip at the default dial');
+  assert.equal(srig.bot.stats.baseMode.pulseSkips.total, 0);
+  const rec = srig.bot.journal.signals.at(-1);
+  assert.ok(!rec || !(rec.reasons || []).some(r => r.includes('base pulse')), 'no pulse reason journaled for the staircase eval');
+});
+
+test('pulse floor: a staircase floor set above zero binds staircase evals at THAT floor, not the shared one', async () => {
+  const srig = rangeRig({ staircaseLive: 1, baseStaircaseMinVolM5: 1000 });
+  srig.views.set('MINTS', view({ address: 'MINTS', symbol: 'STAIR', volM5: 300 }));
+  srig.bot._evalStaircase({ type: 'mark', ts: T0, mint: 'MINTS', symbol: 'STAIR', watchId: 'sw-1', markId: 'sw-1-m3', ordinal: 3, price: 1, lowPrev: 0.9, lowNew: 0.95 });
+  await flush();
+  assert.equal(srig.calls.length, 0);
+  assert.equal(srig.bot.stats.baseMode.pulseSkips.bySetup.staircase, 1);
+  const rec = srig.bot.journal.signals.at(-1);
+  assert.ok(rec.reasons.some(r => r === 'base pulse: volM5 $300 under the $1,000 floor — dead base'), JSON.stringify(rec.reasons));
 });
 
 test('enrollment gate: an UNENROLLED mint’s range mark journals-skips and never buys — base alone is not a nomination', async () => {

@@ -42,7 +42,7 @@ test('staircase: staircaseRecordOf takes only ordinal >= 3 marks, in the spec sh
   assert.equal(staircaseRecordOf(null), null);
   assert.deepEqual(staircaseRecordOf(markRec()), {
     type: 'staircase_signal', ts: T0 + 90 * MIN, mint: MINT, symbol: 'STR',
-    watchId: 'sw-1', markId: 'sw-1-m3', ordinal: 3, price: 1.30, lowPrev: 1.12, lowNew: 1.18,
+    watchId: 'sw-1', markId: 'sw-1-m3', ordinal: 3, seedSource: 'signal', price: 1.30, lowPrev: 1.12, lowNew: 1.18,
   });
 });
 
