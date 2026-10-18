@@ -56,13 +56,14 @@ const CARD_CACHE_MS = 60000;
  *  (a row whose cap can't be read is skipped: the floor must be verified,
  *  not assumed), deduped within the page, capped at `limit`. Pure — the
  *  Bot owns the hourly budget, the watch-cap headroom and the seeding. */
-export function pickTrendSeeds(rows, { minMc = 0, limit = Infinity } = {}) {
+export function pickTrendSeeds(rows, { minMc = 0, limit = Infinity, exclude = null } = {}) {
   const out = [];
   const seen = new Set();
   for (const row of rows || []) {
     if (out.length >= limit) break;
     const mint = row && (row.mint || row.address);
     if (!mint || seen.has(mint)) continue;
+    if (exclude && exclude.has(mint)) continue; // already watched — walk deeper into the list instead of spending the limit on collisions
     const mc = row.usd_market_cap ?? row.market_cap ?? row.mc ?? null;
     if (mc == null || !Number.isFinite(mc) || mc < minMc) continue;
     seen.add(mint);

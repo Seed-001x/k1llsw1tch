@@ -400,6 +400,10 @@ test('trend seeds: pickTrendSeeds keeps only readable caps at/above the floor, d
   assert.deepEqual(pickTrendSeeds(rows, { minMc: 25_000, limit: 2 }).map(p => p.mint), ['A', 'D']);
   assert.deepEqual(pickTrendSeeds(rows, { minMc: 0, limit: 10 }).map(p => p.mint), ['A', 'B', 'D', 'E']); // C still out: no cap at any floor
   assert.deepEqual(pickTrendSeeds(null, { minMc: 0 }), []);
+  // Already-watched mints are walked past WITHOUT spending the limit — the
+  // head of the trending list is usually already watched, and the seed
+  // budget must reach the quieter coins deeper in the page.
+  assert.deepEqual(pickTrendSeeds(rows, { minMc: 25_000, limit: 1, exclude: new Set(['A']) }).map(p => p.mint), ['D']);
 });
 
 test('trend seeds: seedSource stamps the seed, its marks, and the card tally — signal seeds default to signal', async () => {

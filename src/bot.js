@@ -1476,7 +1476,7 @@ export class Bot {
       if (budget <= 0) return;
       const room = STRUCTURE_MAX_WATCHES - this.structureWatch.active.size;
       if (room <= 0) return;
-      const picks = pickTrendSeeds(rows, { minMc: this.cfg.structureSeedMinMc || 0, limit: Math.min(budget, room) });
+      const picks = pickTrendSeeds(rows, { minMc: this.cfg.structureSeedMinMc || 0, limit: Math.min(budget, room), exclude: new Set(this.structureWatch.activeMint.keys()) });
       for (const p of picks) {
         if (bl && bl.has(p.mint)) continue;
         if (this.structureWatch.active.size >= STRUCTURE_MAX_WATCHES) break;
