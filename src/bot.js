@@ -4215,7 +4215,7 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
       flowConfirm: this._flowConfirmState(),
       watchlist: this.watch.size,
       pairedShadow: this.paired ? { pending: this.paired.pending.size, done: this.paired.done.length } : { pending: 0, done: 0 },
-      positions: this.positions.map(p => ({ id: p.id, symbol: p.symbol, mint: p.mint, setup: p.setup, entrySol: p.entrySol, remainingFrac: p.remainingFrac, peakRatio: +(p.peakRatio || 1).toFixed(2), heldMin: +((this.now() - p.entryTs) / 60000).toFixed(1), simulated: p.simulated, noTp: !!p.noTp, protected: p.protected || null, takenOver: p.takenOver || null, tp1AtPct: p.tp1AtPct ?? null, path: p.pathClass || null, stallPending: p.stallPending ?? null, bagDeadWaves: p.bagDeadWaves ?? null })),
+      positions: this.positions.map(p => ({ id: p.id, symbol: p.symbol, mint: p.mint, setup: p.setup, entrySol: p.entrySol, remainingFrac: p.remainingFrac, peakRatio: +(p.peakRatio || 1).toFixed(2), heldMin: +((this.now() - p.entryTs) / 60000).toFixed(1), simulated: p.simulated, noTp: !!p.noTp, protected: p.protected || null, takenOver: p.takenOver || null, tp1AtPct: p.tp1AtPct ?? null, path: p.pathClass || null, stallPending: p.stallPending ?? null, bagDeadWaves: p.bagDeadWaves ?? null, ddVitals: p.ddVitals ?? null })),
       // stats.shadowTrades is read from the tracker at read time so /state can
       // never show a stale report card between the maintained sync points
       // gtOutcomes is read from the gtFetch tallies at read time (same pattern
