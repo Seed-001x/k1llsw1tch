@@ -620,6 +620,36 @@ export function loadConfig(env = process.env) {
     // volume-bot grind signature. NOTHING trades on it; it rides ticks,
     // /state and close records for a later verdict. FAKE_ALIVE_STAMP=0 off.
     fakeAliveStamp: env.FAKE_ALIVE_STAMP !== '0',
+    // WALLET CENSUS (owner route order 2026-10-18, "Websocket"): a Helius
+    // RPC websocket watches OPEN positions' mints (logsSubscribe mentions)
+    // and accumulates who is actually trading — distinct buyers, first-seen
+    // buyers, wash overlap. Record-only in itself; its one consumer is the
+    // grind judge below. CENSUS_WATCH=0 off. Window = the trailing read
+    // the census stamps and the judge consume.
+    censusWatch: env.CENSUS_WATCH !== '0',
+    censusWindowMin: num(env, 'CENSUS_WINDOW_MIN', 10),
+    // GRIND JUDGE (owner order 2026-10-18, "do what must be done"): the
+    // downside judge for puppeted coins — fires pre-TP1 when BOTH witnesses
+    // agree the bid is manufactured: the trailing fake-alive share is high
+    // AND the census shows buys printing from a dead buyer census (few
+    // distinct wallets, zero first-seen). Slow confirm, undertaker idiom.
+    // GRIND_JUDGE=0 kills the module; GRIND_JUDGE_LIVE=1 arms live firing
+    // (default off — shadow would-fires journal either way). Kill rule:
+    // at GRIND_KILL_N finalized judge closes, >= GRIND_KILL_WRONG of them
+    // ripping >= GRIND_WRONG_PEAK_PCT in the post-exit window disables it.
+    grindJudge: env.GRIND_JUDGE !== '0',
+    grindJudgeLive: env.GRIND_JUDGE_LIVE === '1',
+    grindMinAgeSec: num(env, 'GRIND_MIN_AGE_SEC', 600),
+    grindMaxRatio: num(env, 'GRIND_MAX_RATIO', 0.95),
+    grindFaShare: num(env, 'GRIND_FA_SHARE', 0.30),
+    grindFaWindowMin: num(env, 'GRIND_FA_WINDOW_MIN', 30),
+    grindFaMinSamples: num(env, 'GRIND_FA_MIN_SAMPLES', 30),
+    grindMinBuysWindow: num(env, 'GRIND_MIN_BUYS_WINDOW', 8),
+    grindMaxUniqBuyers: num(env, 'GRIND_MAX_UNIQ_BUYERS', 4),
+    grindConfirmSec: num(env, 'GRIND_CONFIRM_SEC', 120),
+    grindKillN: num(env, 'GRIND_KILL_N', 10),
+    grindKillWrong: num(env, 'GRIND_KILL_WRONG', 6),
+    grindWrongPeakPct: num(env, 'GRIND_WRONG_PEAK_PCT', 25),
     dipStopPct: num(env, 'DIP_STOP_PCT', 0.05),           // sell if PRICE drops this far below entry (0 = off)
     stallSec: num(env, 'STALL_SEC', 60),                  // entry stall: sell if price never breaks out within this many seconds of entry (0 = off)
     stallBandPct: num(env, 'STALL_BAND_PCT', 0.05),       // entry range half-width: at stallSec the price must be OUTSIDE entry ± this or the position sells (user 2026-10-13 endpoint version)
