@@ -1,4 +1,5 @@
 import { loadConfig, validateConfig } from './config.js';
+import { SETTINGS_KEYS, loadSettingsOverlay, applySettings } from './settings.js';
 import { Executor } from './exec.js';
 import { Bot } from './bot.js';
 import { startServer } from './server.js';
@@ -9,8 +10,18 @@ const cfg = loadConfig();
 const errs = validateConfig(cfg);
 if (errs.length) { console.error('Config errors:\n - ' + errs.join('\n - ')); process.exit(1); }
 
+// Settings overlay (owner order 2026-10-18): the dashboard Settings tab's
+// saved values re-apply on top of the env config at every boot. The env
+// snapshot is kept as the baseline the tab shows and resets to. The
+// overlay is sanitized inside settings.js and can never fail the boot.
+const settingsBaseline = {};
+for (const k of SETTINGS_KEYS) settingsBaseline[k] = cfg[k];
+const settingsOverlay = loadSettingsOverlay(cfg.dataDir);
+const settingsApplied = applySettings(cfg, settingsOverlay);
+if (settingsApplied.length) console.log(`[edgebot] settings overlay applied over env (${settingsApplied.length}): ${settingsApplied.join(', ')}`);
+
 const exec = new Executor(cfg);
-const bot = new Bot(cfg, { discover, fetchViews, fetchSolUsd, fetchRug, fetchCurve: (mint) => fetchCurve(mint, cfg), fetchCurveLife, fetchHolderCount: (mint) => fetchHolderCount(mint, { rpcUrls: cfg.rpcUrls }), ranRebuyCheck, exec });
+const bot = new Bot(cfg, { discover, fetchViews, fetchSolUsd, fetchRug, fetchCurve: (mint) => fetchCurve(mint, cfg), fetchCurveLife, fetchHolderCount: (mint) => fetchHolderCount(mint, { rpcUrls: cfg.rpcUrls }), ranRebuyCheck, exec, settingsBaseline, settingsOverlay });
 
 console.log(`[edgebot] mode=${cfg.realMode ? 'REAL' : 'SHADOW'}${cfg.modeWarning ? '  (' + cfg.modeWarning + ')' : ''}`);
 console.log(`[edgebot] limits: ${cfg.tradeSol} SOL/trade, ${cfg.maxPositions} positions, daily loss cap ${cfg.dailyLossSol} SOL, kill at <${cfg.killEquityFrac * 100}% equity`);

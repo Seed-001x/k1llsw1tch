@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { listState } from './pumpLists.js';
 import { EXIT_REASONS, EXIT_REASON_LABELS, learnReport } from './learn.js';
+import { sanitizeSettings, applySettings, settingsView, saveSettingsOverlay } from './settings.js';
 
 // Browser-scraped "real" pump.fun lists (from hourly browser task, not the API relay).
 // Stored in DATA_DIR so it persists across deploys.
@@ -39,7 +40,7 @@ export function startServer(bot, port) {
   // ADMIN_KEY set (local/tests), everything behaves as before.
   const ADMIN_KEY = process.env.ADMIN_KEY || '';
   if (!ADMIN_KEY) console.log('[server] ADMIN_KEY not set — write endpoints are OPEN');
-  const GUARDED = new Set(['/feedback', '/feedback/clear', '/feedback/note', '/exittag', '/temprules', '/positions/clear', '/positions/notp', '/protect', '/unprotect', '/takeover', '/release', '/tp1at', '/tp1clear', '/halt', '/resume', '/risk/reset']);
+  const GUARDED = new Set(['/feedback', '/feedback/clear', '/feedback/note', '/exittag', '/temprules', '/positions/clear', '/positions/notp', '/protect', '/unprotect', '/takeover', '/release', '/tp1at', '/tp1clear', '/halt', '/resume', '/risk/reset', '/settings']);
   const srv = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
     // CORS preflight
@@ -53,6 +54,12 @@ export function startServer(bot, port) {
       return;
     }
     if (ADMIN_KEY && req.method !== 'GET' && (GUARDED.has(u.pathname) || u.pathname.startsWith('/positions/')) && req.headers['x-admin-key'] !== ADMIN_KEY) {
+      return json(res, 401, { error: 'admin key required' });
+    }
+    // /settings is the owner's private control surface (owner order
+    // 2026-10-18: "only me being able to see it") — unlike the view-first
+    // dashboard GETs, even READING it requires the admin key.
+    if (u.pathname === '/settings' && ADMIN_KEY && req.headers['x-admin-key'] !== ADMIN_KEY) {
       return json(res, 401, { error: 'admin key required' });
     }
     // POST /feedback — human marks a skipped signal as good/bad
@@ -498,6 +505,80 @@ export function startServer(bot, port) {
       try { bot.risk.clearBrake(); } catch {} // the deliberate reset also lifts the risk brake (counter + halving)
       bot.risk.save();
       return json(res, 200, { ok: true, dayPnlSol: 0, brakeRed: 0, sizeHalved: false });
+    }
+    // GET /settings — the Settings tab's read (key-gated above, even for
+    // GET): every dial with its live value, its env-boot baseline, and
+    // whether the saved overlay overrides it, plus the safety panel's
+    // state (halt, risk anchors, wallet balance).
+    if (req.method === 'GET' && u.pathname === '/settings') {
+      (async () => {
+        let balanceSol = null;
+        try { balanceSol = await bot.exec.solBalance(); } catch { /* readout only */ }
+        let risk = null;
+        try { risk = bot.risk.state(); } catch { /* readout only */ }
+        let halted = null;
+        try { halted = fs.existsSync(path.join(bot.cfg.dataDir, 'HALT')); } catch { /* readout only */ }
+        return json(res, 200, {
+          settings: settingsView(bot.cfg, bot.settingsBaseline, bot.settingsOverlay),
+          halted, balanceSol, risk,
+        });
+      })();
+      return;
+    }
+    // POST /settings — the Settings tab's write (admin-guarded above).
+    // Three shapes: { values: {key: value, ...} } saves dials (applied to
+    // the live cfg immediately AND persisted to the boot overlay);
+    // { reset: [key, ...] } drops overrides back to the env baseline;
+    // { action: 'rearm' } re-arms the fail-safes at the current balance —
+    // the union of /risk/reset's counter zeroing and /resume's anchor
+    // logic, WITHOUT touching the HALT file: day counters zeroed, brake /
+    // streak pause / down-halt / equity kill latches cleared, and both
+    // balance anchors re-based at the live wallet equity.
+    if (req.method === 'POST' && u.pathname === '/settings') {
+      let body = '';
+      req.on('data', c => { body += c; if (body.length > 10000) req.destroy(); });
+      req.on('end', async () => {
+        try {
+          const b = JSON.parse(body || '{}');
+          if (b.action === 'rearm') {
+            let bal = null;
+            try { bal = await bot.exec.solBalance(); } catch { /* anchored at next check instead */ }
+            bot.risk.s.dayPnlSol = 0;
+            bot.risk.s.day = new Date().toISOString().slice(0, 10);
+            try { bot.risk.clearBrake(); } catch {}
+            try { bot.risk.clearDownHalt(); } catch {}
+            try { bot.risk.clearStreakPause(); } catch {}
+            try { bot.risk.clearKill(); } catch {}
+            if (bal != null) {
+              bot.risk.initEquity(bal); // startEquitySol was just nulled by clearKill → re-anchors here
+              const openCost = (bot.positions || []).reduce((a, p) => a + (p.entrySol || 0), 0);
+              bot.risk.s.haltBalBaseline = bal + openCost; // the same equity the balance-halt check would anchor on
+            }
+            bot.risk.save();
+            let risk = null;
+            try { risk = bot.risk.state(); } catch { /* readout only */ }
+            return json(res, 200, { ok: true, rearmed: true, balanceSol: bal, risk });
+          }
+          if (Array.isArray(b.reset) && b.reset.length) {
+            const restored = {};
+            for (const k of b.reset) if (bot.settingsBaseline && k in bot.settingsBaseline) restored[k] = bot.settingsBaseline[k];
+            applySettings(bot.cfg, restored);
+            for (const k of Object.keys(restored)) delete bot.settingsOverlay[k];
+            try { saveSettingsOverlay(bot.cfg.dataDir, bot.settingsOverlay); } catch (e) { return json(res, 500, { error: 'persist failed: ' + e.message }); }
+            return json(res, 200, { ok: true, reset: Object.keys(restored), settings: settingsView(bot.cfg, bot.settingsBaseline, bot.settingsOverlay) });
+          }
+          if (b.values && typeof b.values === 'object') {
+            const { values, errors } = sanitizeSettings(b.values);
+            if (!Object.keys(values).length && errors.length) return json(res, 400, { error: errors.join('; ') });
+            applySettings(bot.cfg, values);
+            bot.settingsOverlay = { ...bot.settingsOverlay, ...values };
+            try { saveSettingsOverlay(bot.cfg.dataDir, bot.settingsOverlay); } catch (e) { return json(res, 500, { error: 'persist failed: ' + e.message }); }
+            return json(res, 200, { ok: true, applied: Object.keys(values), errors, settings: settingsView(bot.cfg, bot.settingsBaseline, bot.settingsOverlay) });
+          }
+          return json(res, 400, { error: 'expected { values }, { reset: [keys] }, or { action: "rearm" }' });
+        } catch { return json(res, 400, { error: 'invalid JSON' }); }
+      });
+      return;
     }
     if (req.method === 'GET' && u.pathname === '/ticks') {
       const mint = u.searchParams.get('mint') || '';

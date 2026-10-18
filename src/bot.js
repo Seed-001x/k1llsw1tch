@@ -63,6 +63,12 @@ export class Bot {
   constructor(cfg, deps) {
     this.cfg = cfg; this.d = deps; this.now = deps.now || Date.now;
     this.exec = deps.exec;
+    // Settings tab state (owner order 2026-10-18): the env-boot baseline
+    // for every settings-schema key + the live overlay values applied on
+    // top of it (index.js computes both; unit rigs leave them empty and
+    // /settings simply reports no overrides).
+    this.settingsBaseline = deps.settingsBaseline || null;
+    this.settingsOverlay = deps.settingsOverlay || {};
     fs.mkdirSync(cfg.dataDir, { recursive: true });
     this.history = new History();
     this.journal = new Journal(cfg.dataDir, { now: this.now });
