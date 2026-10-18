@@ -58,7 +58,7 @@ export class Journal {
   constructor(dir, { now = Date.now } = {}) {
     this.now = now;
     this.dir = dir;
-    this.f = { sig: path.join(dir, 'signals.jsonl'), out: path.join(dir, 'outcomes.jsonl'), trades: path.join(dir, 'trades.jsonl'), fb: path.join(dir, 'feedback.jsonl'), ticks: path.join(dir, 'ticks.jsonl'), manual: path.join(dir, 'manual_exits.jsonl'), reports: path.join(dir, 'trade_reports.jsonl'), rshadow: path.join(dir, 'ratchet_shadow.jsonl'), pend: path.join(dir, 'outcome_pending.json'), scan: path.join(dir, 'scans.jsonl'), sses: path.join(dir, 'scan_sessions.jsonl'), cshadow: path.join(dir, 'callout_shadow.jsonl'), rsig: path.join(dir, 'resignal_shadow.jsonl'), fexit: path.join(dir, 'flow_exits.jsonl'), swatch: path.join(dir, 'structure_watch.jsonl'), ssell: path.join(dir, 'shadow_sell.jsonl'), stair: path.join(dir, 'staircase_signals.jsonl'), pticks: path.join(dir, 'position_ticks.jsonl'), bwatch: path.join(dir, 'bottom_marks.jsonl'), rwatch: path.join(dir, 'range_marks.jsonl'), ngcut: path.join(dir, 'nevergreen.jsonl'), fconfirm: path.join(dir, 'flow_confirm.jsonl') };
+    this.f = { sig: path.join(dir, 'signals.jsonl'), out: path.join(dir, 'outcomes.jsonl'), trades: path.join(dir, 'trades.jsonl'), fb: path.join(dir, 'feedback.jsonl'), ticks: path.join(dir, 'ticks.jsonl'), manual: path.join(dir, 'manual_exits.jsonl'), reports: path.join(dir, 'trade_reports.jsonl'), rshadow: path.join(dir, 'ratchet_shadow.jsonl'), pend: path.join(dir, 'outcome_pending.json'), scan: path.join(dir, 'scans.jsonl'), sses: path.join(dir, 'scan_sessions.jsonl'), cshadow: path.join(dir, 'callout_shadow.jsonl'), rsig: path.join(dir, 'resignal_shadow.jsonl'), fexit: path.join(dir, 'flow_exits.jsonl'), swatch: path.join(dir, 'structure_watch.jsonl'), ssell: path.join(dir, 'shadow_sell.jsonl'), stair: path.join(dir, 'staircase_signals.jsonl'), pticks: path.join(dir, 'position_ticks.jsonl'), bwatch: path.join(dir, 'bottom_marks.jsonl'), rwatch: path.join(dir, 'range_marks.jsonl'), ngcut: path.join(dir, 'nevergreen.jsonl'), fconfirm: path.join(dir, 'flow_confirm.jsonl'), grind: path.join(dir, 'grind_judge.jsonl') };
     this._pendDirty = false;   // outcome-tracking progress changed since the last save
     this._pendSavedAt = 0;
     try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
@@ -200,6 +200,10 @@ export class Journal {
    *  (type 'flowConfirmDisabled', carrying the closes count + mean PnL at
    *  trip time) in its own file, searchable long after /state rotated. */
   flowConfirm(rec) { this.append(this.f.fconfirm, rec); return rec; }
+  /** GRIND JUDGE events (2026-10-18): first-hot marks, live fires, shadow
+   *  would-fires and the pre-registered kill rule's self-disablement —
+   *  the judge's evidence trail in its own file (see grindJudge.js). */
+  grind(rec) { this.append(this.f.grind, rec); return rec; }
   /** Structure Watch record (seed / sample / mark / mark-score / end / skip) — append-only, observer only (see structureWatch.js). No in-memory tail; the watch folds the full file itself. */
   structure(rec) { this.append(this.f.swatch, rec); return rec; }
   /** Shadow Seller record (fire / paired) — observer only, append-only; the capped in-memory tail feeds the /shadowseller card and the judge's boot rebuild of fired/pending state (see shadowSeller.js). */

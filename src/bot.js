@@ -37,7 +37,9 @@ import { WalletWatch } from './walletWatch.js';
 import { buildTradeReport } from './reports.js';
 import { gtOutcomesSnapshot } from './gtFetch.js';
 import { configStamp } from './stamp.js';
-import { sampleFakeAlive, fakeAliveStamp } from './fakeAlive.js';
+import { sampleFakeAlive, fakeAliveStamp, fakeAliveWindow } from './fakeAlive.js';
+import { newCensus, censusFold, censusWindow, censusStamp } from './census.js';
+import { evaluateGrind, grindReason, grindKillTally } from './grindJudge.js';
 
 // Scan Ledger: a watch session finalizes at this age even if the coin is
 // still being viewed (a re-view afterward starts a fresh session).
@@ -150,6 +152,11 @@ export class Bot {
     // per-mint 2-entry cap or hand the lane a fresh 15-trade sample.
     this.flowConfirmFile = path.join(cfg.dataDir, 'flow-confirm.json');
     this.flowConfirmState = this.loadFlowConfirm();
+    // GRIND JUDGE persisted state (2026-10-18): fires/closes tallies and
+    // the pre-registered kill rule's latches, mirroring the lane's file.
+    this.grindFile = path.join(cfg.dataDir, 'grind-judge.json');
+    this.grindState = this.loadGrindState();
+    this.censusFeed = null; // wired from index.js when CENSUS_WATCH is on
     // BASE MODE enrollment restore (owner decision 2026-10-16 23:16
     // EDT): range entries require a NOMINATED mint — re-arm the
     // enrollment map from the journal's enrollment records inside the
@@ -275,6 +282,80 @@ export class Bot {
   }
   saveFlowConfirm() { try { fs.writeFileSync(this.flowConfirmFile, JSON.stringify(this.flowConfirmState)); } catch { /* best effort */ } }
 
+  loadGrindState() {
+    const dflt = () => ({ fires: 0, closes: 0, killChecked: false, disabled: false, disabledAt: null, finalizedAtCheck: null, wrongAtCheck: null });
+    try {
+      const s = JSON.parse(fs.readFileSync(this.grindFile, 'utf8'));
+      return { ...dflt(), ...(s || {}) };
+    } catch { return dflt(); }
+  }
+  saveGrindState() { try { fs.writeFileSync(this.grindFile, JSON.stringify(this.grindState)); } catch { /* best effort */ } }
+
+  /** Census feed entry point (wired in index.js): fold a parsed trade
+   *  into every open position on that mint. Observer-grade: never throws
+   *  into the feed, never trades. */
+  _censusOnTrade(mint, trade) {
+    try {
+      if (!this.cfg.censusWatch) return;
+      for (const pos of this.positions) {
+        if (pos.mint !== mint) continue;
+        if (!pos.census) pos.census = newCensus(this.now());
+        censusFold(pos.census, trade, this.now());
+      }
+    } catch { /* census is an observer */ }
+  }
+
+  /** Keep the census feed's desired set == open positions' mints, and
+   *  every open position's census initialized (so stamps exist even on a
+   *  zero-trade watch). Rides positionTick; cheap and fail-silent. */
+  _syncCensus() {
+    try {
+      if (!this.cfg.censusWatch) return;
+      for (const pos of this.positions) if (!pos.census) pos.census = newCensus(this.now());
+      if (this.censusFeed) this.censusFeed.setDesired(this.positions.map(p => p.mint));
+    } catch { /* observer */ }
+  }
+
+  /** The grind judge's pre-registered kill rule: once grindKillN of its
+   *  closes have FINALIZED post-exit outcomes, if grindKillWrong+ of them
+   *  ripped >= grindWrongPeakPct inside the post-exit window (it sold
+   *  into bounces — the unambiguous harm), the judge disables itself. */
+  _grindKillCheck() {
+    try {
+      const st = this.grindState;
+      if (!this.cfg.grindJudge || !st || st.killChecked || st.disabled) return;
+      const { finalized, wrong } = grindKillTally(this.postExit ? this.postExit.done : [], this.cfg);
+      if (finalized < this.cfg.grindKillN) return;
+      st.killChecked = true; st.finalizedAtCheck = finalized; st.wrongAtCheck = wrong;
+      if (wrong >= this.cfg.grindKillWrong) {
+        st.disabled = true; st.disabledAt = this.now();
+        try { this.journal.grind({ type: 'grindDisabled', ts: st.disabledAt, finalized, wrong, killN: this.cfg.grindKillN, wrongBar: this.cfg.grindKillWrong, peakPct: this.cfg.grindWrongPeakPct }); } catch { /* journaling never blocks */ }
+        console.log(`[grindjudge] KILL RULE: ${wrong}/${finalized} judge exits ripped >= +${this.cfg.grindWrongPeakPct}% post-exit — judge DISABLED (census + stamps continue)`);
+      } else {
+        console.log(`[grindjudge] kill-rule check at ${finalized} finalized exits: ${wrong} bad bounces < ${this.cfg.grindKillWrong} — judge stays live`);
+      }
+      this.saveGrindState();
+    } catch { /* bookkeeping only */ }
+  }
+
+  /** The /state grindJudge block: arm state + the kill rule's report card. */
+  _grindJudgeState() {
+    const st = this.grindState || {};
+    const { finalized, wrong } = grindKillTally(this.postExit ? this.postExit.done : [], this.cfg);
+    return {
+      enabled: !!this.cfg.grindJudge,
+      live: !!(this.cfg.grindJudge && this.cfg.grindJudgeLive && !st.disabled),
+      liveSwitch: !!this.cfg.grindJudgeLive,
+      disabled: !!st.disabled,
+      disabledAt: st.disabledAt ?? null,
+      fires: st.fires || 0,
+      closes: st.closes || 0,
+      killN: this.cfg.grindKillN, killWrong: this.cfg.grindKillWrong,
+      killChecked: !!st.killChecked,
+      finalized, wrong,
+    };
+  }
+
   // Pace keeper: returns a relaxed cfg if we're behind the hourly target.
   // Never overrides user blacklists, RugCheck safety, or risk limits.
   paceCfg(n) {
@@ -341,6 +422,11 @@ export class Bot {
     // it, so the study can join score to outcome. Funnel fills it only when
     // the caller didn't (no caller ever does).
     if (full.fakeAlive === undefined) full.fakeAlive = fakeAliveStamp(pos);
+    if (full.census === undefined) full.census = censusStamp(pos, this.now(), this.cfg.censusWindowMin * 60000);
+    if (typeof full.reason === 'string' && full.reason.startsWith('grind judge')) {
+      this.grindState.closes++;
+      this.saveGrindState();
+    }
     // D1 (record-only): EVERY close carries the full decision record, whichever
     // path closed it. The entry snapshot used to survive only on manual exits —
     // bot-managed closes dropped it here, which is why /learn's bot-winner
@@ -3629,6 +3715,8 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
 
   // ------------------------------------------------------------ position management
   async positionTick() {
+    this._syncCensus();
+    if (!this._grindKillAt || this.now() - this._grindKillAt >= 60000) { this._grindKillAt = this.now(); this._grindKillCheck(); }
     if (this.busy.pos || !this.positions.length) return;
     this.busy.pos = true;
     try {
@@ -3856,6 +3944,48 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
         pos.ddVitals.pending = !!pos.ddPendingSince;
       } catch (e) { this.err(`death detector ${pos.symbol}`, e); }
     }
+    // GRIND JUDGE (owner order 2026-10-18; src/grindJudge.js): the
+    // puppeted-bid judge. Same scope discipline as the death detector —
+    // pre-TP1, HOLD decisions only, protect/takeover silence it — but
+    // its witnesses are the two the volume bot cannot fake: the trailing
+    // fake-alive share and the wallet census. Slow confirm, undertaker
+    // idiom: the conjunction must still hold grindConfirmSec after the
+    // first hot check before it can sell. A kill-rule-disabled judge and
+    // GRIND_JUDGE_LIVE=0 both reduce it to shadow would-fires.
+    if (this.cfg.grindJudge && !this.grindState.disabled && !decision.fraction && !pos.tp1Done && !pos.protected && !pos.takenOver) {
+      try {
+        const gRatio = valueSol / Math.max(1e-9, pos.entrySol * pos.remainingFrac);
+        const faWin = fakeAliveWindow(pos, n, this.cfg.grindFaWindowMin * 60000);
+        const cenWin = pos.census ? censusWindow(pos.census, n, this.cfg.censusWindowMin * 60000) : null;
+        const verdict = evaluateGrind({ cfg: this.cfg, ageSec: (n - pos.entryTs) / 1000, ratio: gRatio, faWin, cenWin, censusAgeMs: pos.census ? n - pos.census.startedTs : null });
+        if (verdict.hot) {
+          if (!pos.grindPendingSince) {
+            pos.grindPendingSince = n;
+            try { this.journal.grind({ type: 'grindHot', id: pos.id, mint: pos.mint, symbol: pos.symbol, ts: n, faShare: faWin.share, faSamples: faWin.samples, buysW: cenWin.buys, uniqW: cenWin.uniqBuyers, newW: cenWin.newBuyers, ratio: +gRatio.toFixed(3) }); } catch { /* record-only */ }
+            console.log(`[grindjudge] ${pos.symbol}: HOT — fake-alive ${faWin.share} (${this.cfg.grindFaWindowMin}m), census ${cenWin.buys} buys/${cenWin.uniqBuyers} uniq/${cenWin.newBuyers} new (${this.cfg.censusWindowMin}m); confirm window ${this.cfg.grindConfirmSec}s started`);
+          } else if (n - pos.grindPendingSince >= this.cfg.grindConfirmSec * 1000) {
+            const reason = grindReason({ faShare: faWin.share, faWinMin: this.cfg.grindFaWindowMin, buys: cenWin.buys, uniq: cenWin.uniqBuyers, fresh: cenWin.newBuyers, winMin: this.cfg.censusWindowMin });
+            if (this.cfg.grindJudgeLive) {
+              decision = { fraction: 1, reason, newPeak: pos.peakRatio, grindJudge: true };
+              pos.grindFired = true;
+              this.grindState.fires++;
+              this.saveGrindState();
+              try { this.journal.grind({ type: 'grindFire', id: pos.id, mint: pos.mint, symbol: pos.symbol, ts: n, faShare: faWin.share, buysW: cenWin.buys, uniqW: cenWin.uniqBuyers, newW: cenWin.newBuyers, ratio: +gRatio.toFixed(3), pendingSec: +((n - pos.grindPendingSince) / 1000).toFixed(0) }); } catch { /* record-only */ }
+              console.log(`[grindjudge] ${pos.symbol}: FIRING — ${reason}`);
+            } else if (!pos.grindWouldFired) {
+              pos.grindWouldFired = true;
+              try { this.journal.grind({ type: 'grindWouldFire', id: pos.id, mint: pos.mint, symbol: pos.symbol, ts: n, faShare: faWin.share, buysW: cenWin.buys, uniqW: cenWin.uniqBuyers, newW: cenWin.newBuyers, ratio: +gRatio.toFixed(3) }); } catch { /* record-only */ }
+              console.log(`[grindjudge] ${pos.symbol}: WOULD FIRE (live switch off) — ${reason}`);
+            }
+            pos.grindPendingSince = null;
+          }
+        } else if (pos.grindPendingSince) {
+          pos.grindPendingSince = null;
+          try { this.journal.grind({ type: 'grindCancel', id: pos.id, mint: pos.mint, symbol: pos.symbol, ts: n, why: verdict.why }); } catch { /* record-only */ }
+          console.log(`[grindjudge] ${pos.symbol}: pending cancelled (${verdict.why})`);
+        }
+      } catch (e) { this.err(`grind judge ${pos.symbol}`, e); }
+    }
     pos.peakRatio = decision.newPeak || pos.peakRatio;
     // position-tick journal (record-only): this check's mark, recorded AFTER the
     // peak update so peakRatio in the record includes this check — the write
@@ -4004,9 +4134,9 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
       // the tick itself carries the running share. Fail-silent observer —
       // nothing anywhere branches on the result.
       if (this.cfg.fakeAliveStamp) {
-        try { sampleFakeAlive(pos, { ratio: +(valueSol / Math.max(1e-9, pos.entrySol * pos.remainingFrac)).toFixed(3), buysM5: v.buysM5 ?? null, sellsM5: v.sellsM5 ?? null }); } catch { /* record-only */ }
+        try { sampleFakeAlive(pos, { ratio: +(valueSol / Math.max(1e-9, pos.entrySol * pos.remainingFrac)).toFixed(3), buysM5: v.buysM5 ?? null, sellsM5: v.sellsM5 ?? null, ts: n }); } catch { /* record-only */ }
       }
-      this.journal.tick({ id: pos.id, mint: pos.mint, symbol: pos.symbol, ts: n, heldMin: +((n - pos.entryTs) / 60000).toFixed(2), valueSol: +valueSol.toFixed(6), ratio: +(valueSol / Math.max(1e-9, pos.entrySol * pos.remainingFrac)).toFixed(3), peak: +(pos.peakRatio || 1).toFixed(3), mc: v.mc ?? null, liq: v.liq ?? null, buysM5: v.buysM5 ?? null, sellsM5: v.sellsM5 ?? null, bundle: pos.bundleScore || 0, fakeAlive: fakeAliveStamp(pos)?.share ?? null });
+      this.journal.tick({ id: pos.id, mint: pos.mint, symbol: pos.symbol, ts: n, heldMin: +((n - pos.entryTs) / 60000).toFixed(2), valueSol: +valueSol.toFixed(6), ratio: +(valueSol / Math.max(1e-9, pos.entrySol * pos.remainingFrac)).toFixed(3), peak: +(pos.peakRatio || 1).toFixed(3), mc: v.mc ?? null, liq: v.liq ?? null, buysM5: v.buysM5 ?? null, sellsM5: v.sellsM5 ?? null, bundle: pos.bundleScore || 0, fakeAlive: fakeAliveStamp(pos)?.share ?? null, censusUniqW: pos.census ? censusWindow(pos.census, n, this.cfg.censusWindowMin * 60000)?.uniqBuyers ?? null : null, censusNewW: pos.census ? censusWindow(pos.census, n, this.cfg.censusWindowMin * 60000)?.newBuyers ?? null : null });
       // D1 (record-only): the position's own recent path rides on the position
       // itself (≤24 samples ≈ last 4 min) so a manual exit can attach its
       // last-120s price path without re-reading the tick journal.
@@ -4226,9 +4356,11 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
       risk: this.risk.snapshot(),
       limits: { tradeSol: this.risk.effectiveTradeSol(), maxPositions: this.cfg.maxPositions, dailyLossSol: this.cfg.dailyLossSol, maxTradesPerHour: this.cfg.maxTradesPerHour, tp1Pct: this.cfg.tp1Pct, tp1Frac: this.cfg.tp1Frac },
       flowConfirm: this._flowConfirmState(),
+      grindJudge: this._grindJudgeState(),
+      census: this.stats.census || null,
       watchlist: this.watch.size,
       pairedShadow: this.paired ? { pending: this.paired.pending.size, done: this.paired.done.length } : { pending: 0, done: 0 },
-      positions: this.positions.map(p => ({ id: p.id, symbol: p.symbol, mint: p.mint, setup: p.setup, entrySol: p.entrySol, remainingFrac: p.remainingFrac, peakRatio: +(p.peakRatio || 1).toFixed(2), heldMin: +((this.now() - p.entryTs) / 60000).toFixed(1), simulated: p.simulated, noTp: !!p.noTp, protected: p.protected || null, takenOver: p.takenOver || null, tp1AtPct: p.tp1AtPct ?? null, path: p.pathClass || null, stallPending: p.stallPending ?? null, bagDeadWaves: p.bagDeadWaves ?? null, ddVitals: p.ddVitals ?? null, fakeAlive: fakeAliveStamp(p) })),
+      positions: this.positions.map(p => ({ id: p.id, symbol: p.symbol, mint: p.mint, setup: p.setup, entrySol: p.entrySol, remainingFrac: p.remainingFrac, peakRatio: +(p.peakRatio || 1).toFixed(2), heldMin: +((this.now() - p.entryTs) / 60000).toFixed(1), simulated: p.simulated, noTp: !!p.noTp, protected: p.protected || null, takenOver: p.takenOver || null, tp1AtPct: p.tp1AtPct ?? null, path: p.pathClass || null, stallPending: p.stallPending ?? null, bagDeadWaves: p.bagDeadWaves ?? null, ddVitals: p.ddVitals ?? null, fakeAlive: fakeAliveStamp(p), census: censusStamp(p, this.now(), this.cfg.censusWindowMin * 60000) })),
       // stats.shadowTrades is read from the tracker at read time so /state can
       // never show a stale report card between the maintained sync points
       // gtOutcomes is read from the gtFetch tallies at read time (same pattern
