@@ -37,6 +37,7 @@ import { WalletWatch } from './walletWatch.js';
 import { buildTradeReport } from './reports.js';
 import { gtOutcomesSnapshot } from './gtFetch.js';
 import { configStamp } from './stamp.js';
+import { sampleFakeAlive, fakeAliveStamp } from './fakeAlive.js';
 
 // Scan Ledger: a watch session finalizes at this age even if the coin is
 // still being viewed (a re-view afterward starts a fresh session).
@@ -335,6 +336,11 @@ export class Bot {
     // kill-rule sample can miss or double-count a close.
     if (pos.flowConfirm) this._laneOnClose(pos, rec);
     const full = { type: 'close', ...rec };
+    // FAKE-ALIVE STAMP (record-only, owner 2026-10-18): the position's final
+    // volume-bot grind score rides every close record, whichever path closed
+    // it, so the study can join score to outcome. Funnel fills it only when
+    // the caller didn't (no caller ever does).
+    if (full.fakeAlive === undefined) full.fakeAlive = fakeAliveStamp(pos);
     // D1 (record-only): EVERY close carries the full decision record, whichever
     // path closed it. The entry snapshot used to survive only on manual exits —
     // bot-managed closes dropped it here, which is why /learn's bot-winner
@@ -3993,7 +3999,14 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
     // learning log: trajectory sample every ~10s, and detection of a sell the human made in their own wallet
     if (valueSol != null && n - (pos.lastTickTs || 0) >= 10000) {
       pos.lastTickTs = n;
-      this.journal.tick({ id: pos.id, mint: pos.mint, symbol: pos.symbol, ts: n, heldMin: +((n - pos.entryTs) / 60000).toFixed(2), valueSol: +valueSol.toFixed(6), ratio: +(valueSol / Math.max(1e-9, pos.entrySol * pos.remainingFrac)).toFixed(3), peak: +(pos.peakRatio || 1).toFixed(3), mc: v.mc ?? null, liq: v.liq ?? null, buysM5: v.buysM5 ?? null, sellsM5: v.sellsM5 ?? null, bundle: pos.bundleScore || 0 });
+      // FAKE-ALIVE STAMP (record-only, owner 2026-10-18): score this sample
+      // against the position's sampled history BEFORE the tick is written, so
+      // the tick itself carries the running share. Fail-silent observer —
+      // nothing anywhere branches on the result.
+      if (this.cfg.fakeAliveStamp) {
+        try { sampleFakeAlive(pos, { ratio: +(valueSol / Math.max(1e-9, pos.entrySol * pos.remainingFrac)).toFixed(3), buysM5: v.buysM5 ?? null, sellsM5: v.sellsM5 ?? null }); } catch { /* record-only */ }
+      }
+      this.journal.tick({ id: pos.id, mint: pos.mint, symbol: pos.symbol, ts: n, heldMin: +((n - pos.entryTs) / 60000).toFixed(2), valueSol: +valueSol.toFixed(6), ratio: +(valueSol / Math.max(1e-9, pos.entrySol * pos.remainingFrac)).toFixed(3), peak: +(pos.peakRatio || 1).toFixed(3), mc: v.mc ?? null, liq: v.liq ?? null, buysM5: v.buysM5 ?? null, sellsM5: v.sellsM5 ?? null, bundle: pos.bundleScore || 0, fakeAlive: fakeAliveStamp(pos)?.share ?? null });
       // D1 (record-only): the position's own recent path rides on the position
       // itself (≤24 samples ≈ last 4 min) so a manual exit can attach its
       // last-120s price path without re-reading the tick journal.
@@ -4215,7 +4228,7 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
       flowConfirm: this._flowConfirmState(),
       watchlist: this.watch.size,
       pairedShadow: this.paired ? { pending: this.paired.pending.size, done: this.paired.done.length } : { pending: 0, done: 0 },
-      positions: this.positions.map(p => ({ id: p.id, symbol: p.symbol, mint: p.mint, setup: p.setup, entrySol: p.entrySol, remainingFrac: p.remainingFrac, peakRatio: +(p.peakRatio || 1).toFixed(2), heldMin: +((this.now() - p.entryTs) / 60000).toFixed(1), simulated: p.simulated, noTp: !!p.noTp, protected: p.protected || null, takenOver: p.takenOver || null, tp1AtPct: p.tp1AtPct ?? null, path: p.pathClass || null, stallPending: p.stallPending ?? null, bagDeadWaves: p.bagDeadWaves ?? null, ddVitals: p.ddVitals ?? null })),
+      positions: this.positions.map(p => ({ id: p.id, symbol: p.symbol, mint: p.mint, setup: p.setup, entrySol: p.entrySol, remainingFrac: p.remainingFrac, peakRatio: +(p.peakRatio || 1).toFixed(2), heldMin: +((this.now() - p.entryTs) / 60000).toFixed(1), simulated: p.simulated, noTp: !!p.noTp, protected: p.protected || null, takenOver: p.takenOver || null, tp1AtPct: p.tp1AtPct ?? null, path: p.pathClass || null, stallPending: p.stallPending ?? null, bagDeadWaves: p.bagDeadWaves ?? null, ddVitals: p.ddVitals ?? null, fakeAlive: fakeAliveStamp(p) })),
       // stats.shadowTrades is read from the tracker at read time so /state can
       // never show a stale report card between the maintained sync points
       // gtOutcomes is read from the gtFetch tallies at read time (same pattern

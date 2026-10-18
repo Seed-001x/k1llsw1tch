@@ -614,6 +614,12 @@ export function loadConfig(env = process.env) {
     ddFlowSellMult: num(env, 'DD_FLOW_SELL_MULT', 2),     // sells >= this x buys (count, 5m) toward the flow vital
     ddFlowMinUsd: num(env, 'DD_FLOW_MIN_USD', 400),       // ...AND >= this much estimated sell-side $ in the 5m window (sized, not dust)
     ddConfirmSec: num(env, 'DD_CONFIRM_SEC', 10),         // 2-of-3 must still read bad on the first check at/after this lapse
+    // FAKE-ALIVE STAMP (owner insight + build order 2026-10-18): record-only
+    // per-position score of how much of its life the tape looked balanced
+    // (buys >= 70% of sells) while the price fell under its peak — the
+    // volume-bot grind signature. NOTHING trades on it; it rides ticks,
+    // /state and close records for a later verdict. FAKE_ALIVE_STAMP=0 off.
+    fakeAliveStamp: env.FAKE_ALIVE_STAMP !== '0',
     dipStopPct: num(env, 'DIP_STOP_PCT', 0.05),           // sell if PRICE drops this far below entry (0 = off)
     stallSec: num(env, 'STALL_SEC', 60),                  // entry stall: sell if price never breaks out within this many seconds of entry (0 = off)
     stallBandPct: num(env, 'STALL_BAND_PCT', 0.05),       // entry range half-width: at stallSec the price must be OUTSIDE entry ± this or the position sells (user 2026-10-13 endpoint version)
