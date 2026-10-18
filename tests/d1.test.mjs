@@ -185,17 +185,17 @@ test('D1 paired: a manual exit spawns a virtual exit that terminates with a woul
   bot.latest.set('MINT1', view({ price: 0.5, buysM5: 0, sellsM5: 10 }));
   clock.t = n + 60000;
   bot.paired.tick(m => bot.latest.get(m) || null, clock.t, bot.cfg, 150);
-  // the stall exit (successor to the instant momentum-failure undertaker,
-  // user order 2026-10-16 19:24 EDT) only STAMPS its pending on the first
-  // dead tick — the virtual terminates when the tape is still dead 60s on
-  assert.equal(bot.paired.pending.size, 1, 'first dead tick stamps the stall pending — the 60s confirm is running');
-  clock.t = n + 121000;
-  bot.paired.tick(m => bot.latest.get(m) || null, clock.t, bot.cfg, 150);
-  assert.equal(bot.paired.pending.size, 0, 'virtual position terminated');
+  // the virtual is 21 minutes old and −50% on the crater print, so the
+  // ENTRY CLIP (owner order 2026-10-18, exits.js 5a) terminates it on the
+  // FIRST tick — before the stall exit (successor to the instant
+  // momentum-failure undertaker, user order 2026-10-16 19:24 EDT) can even
+  // stamp its 60s-confirm pending; the pair still records the would-be exit
+  assert.equal(bot.paired.pending.size, 0, 'virtual position terminated on the first crater tick');
   const done = bot.paired.done.find(d => d.id === rec.id);
   assert.ok(done, 'paired comparison record produced');
   assert.equal(done.status, 'exited');
   assert.ok(done.wouldReason, 'records where/when it WOULD have exited');
+  assert.match(done.wouldReason, /entry clip/, 'the clip is the rule that would have exited it');
   assert.ok(done.wouldPnlSol < 0, 'cratered coin → would-be P&L is the loss the human avoided');
   assert.ok(done.manualRemainderPnlSol > 0, 'human remainder mark was positive — the pair is comparable');
   assert.equal(done.manualTs, n);

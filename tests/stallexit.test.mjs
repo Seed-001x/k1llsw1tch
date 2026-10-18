@@ -70,11 +70,16 @@ test('cancel: a live check inside the window kills the pending; dead flow later 
 });
 
 test('no price input: a −50% crash with buyers alive never sells; a green coin on a dead tape does', () => {
+  // the crash half runs with the entry clip OFF (entryClip: 0): since the
+  // owner's 2026-10-18 order, the clip (exits.js 5a) owns a pre-TP1 crash on
+  // price alone — what is judged here is that the STALL EXIT itself still
+  // never reads price: it cannot even stamp a pending off a crash.
+  const noClip = testCfg({ txFeeSol: 0, entryClip: 0 });
   const crash = pos();
   const live = { buysM5: 20, sellsM5: 25 };                        // sells heavy but buyers far above the ≤1 line
-  assert.equal(step(crash, -50, cfg, NOW, live).fraction, 0);
+  assert.equal(step(crash, -50, noClip, NOW, live).fraction, 0);
   assert.equal(crash.stallPending, null);                          // price alone cannot even stamp
-  assert.equal(step(crash, -50, cfg, NOW + 300 * S, live).fraction, 0);
+  assert.equal(step(crash, -50, noClip, NOW + 300 * S, live).fraction, 0);
   const green = pos({ tp1Done: true, remainingFrac: 0.6 });        // middle stage, UP on entry: the old undertaker demanded underwater — this rule does not read price at all
   step(green, 40, cfg, NOW, DEAD);
   assert.equal(green.stallPending, NOW);

@@ -32,7 +32,13 @@ function seedHistory(bot, mint, price = 1) {
 }
 
 function pipelineRig({ cfgOver = {}, env = {} } = {}) {
-  const cfg = testCfg({ tradeSol: 0.02, baseMode: 0, ...cfgOver }, env);
+  // entryClip: 0 — this file pins the JUDGE in isolation. Since the owner's
+  // 2026-10-18 order the entry clip (exits.js 5a) owns any pre-TP1 position
+  // at/below −7% past 3 minutes, and these grind tapes sag through that line
+  // on their way to the judge's own conjunction — in production the judge is
+  // shadow-only, so the clip simply gets there first; if the judge is ever
+  // promoted, the two rules' interaction is a design question for that day.
+  const cfg = testCfg({ tradeSol: 0.02, baseMode: 0, entryClip: 0, ...cfgOver }, env);
   const clock = { t: T0 };
   const q = { valueLam: 19_000_000 };
   const quote = async (input, _o, amount) => (input === SOL_MINT

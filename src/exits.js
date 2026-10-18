@@ -985,6 +985,25 @@ export function evaluateExit(pos, mark, cfg, now) {
     }
   }
 
+  // 5a. ENTRY CLIP (owner order 2026-10-18 17:56 EDT — "adding the 3m timer
+  //     at the entry stall point like we had before — −7% we clip out"): the
+  //     price counterpart the stall exit (5) deliberately lacks. From
+  //     ENTRY_CLIP_SEC of age, a pre-TP1 position whose round-trip move is
+  //     at/below −ENTRY_CLIP_PCT sells in full — no flow conjunction, no
+  //     confirm window: the entry has had its 3 minutes and is underwater
+  //     by his line. Judged on `move` like the dip stop, so it fires on
+  //     what the price did, not on sunk fees. Scope is pre-TP1 only: TP1
+  //     banking proves the entry worked and hands the position to the
+  //     middle/moonbag judges; TP2 is further out of scope still. PROTECT
+  //     does not block it (same posture as the stall exit beside it);
+  //     TAKEOVER returned long before this section.
+  if (cfg.entryClip > 0 && !pos.tp1Done && !pos.tp2Done) {
+    const ageOk = heldMin * 60 >= (cfg.entryClipSec || 0);
+    if (ageOk && move <= 1 - (cfg.entryClipPct || 0)) {
+      return out(1, `entry clip (${((move - 1) * 100).toFixed(1)}% at ${Math.floor(heldMin * 60)}s — stalled entry)`);
+    }
+  }
+
   // 5b. volume decay: volume dried up 70%+ from entry and price isn't pushing up — no fuel left
   //     STRIP (volumeDecay, exit-stack v2): disabled in code — can never fire.
   if (!STRIP.volumeDecay && pos.entryVolH1 > 0 && mark.volH1 != null && heldMin >= 5) {

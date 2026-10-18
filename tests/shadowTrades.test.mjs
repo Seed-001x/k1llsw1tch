@@ -226,12 +226,13 @@ test('server: /shadowtrades serves pending + done in the paging envelope; /state
   await bot.start();
   bot.shadowTrades.open({ id: 'x-open', mint: 'MINT8', symbol: 'OPEN', setup: 'trend', price: 1, mc: 10, ts: T0, sizeSol: 0.02 });
   bot.shadowTrades.open({ id: 'x-done', mint: 'MINT9', symbol: 'DONE', setup: 'liftoff', price: 1, mc: 10, ts: T0, sizeSol: 0.02 });
-  // MINT9 halves on the view into dead flow → past 3 minutes the stall exit
-  // stamps its pending, and with the tape still dead 61s later it closes that
-  // virtual in full (the dip stop that used to take this print is stripped,
-  // and the instant momentum-failure undertaker was replaced by the stall
-  // exit's 60s confirm, user order 2026-10-16 19:24 EDT; the shadow book
-  // runs the same stack as live)
+  // MINT9 halves on the view into dead flow → at 11 minutes old and −50%,
+  // the ENTRY CLIP (owner order 2026-10-18, exits.js 5a) closes that virtual
+  // in full on the first tick — before the stall exit's pending can even
+  // mature (the dip stop that used to take this print is stripped, and the
+  // instant momentum-failure undertaker was replaced by the stall exit's
+  // 60s confirm, user order 2026-10-16 19:24 EDT; the shadow book runs the
+  // same stack as live, clip included)
   bot.shadowTrades.tick(mint => (mint === 'MINT9' ? view({ price: 0.5, buysM5: 1, sellsM5: 10 }) : null), T0 + 660000, cfg, 150);
   bot.shadowTrades.tick(mint => (mint === 'MINT9' ? view({ price: 0.5, buysM5: 1, sellsM5: 10 }) : null), T0 + 721000, cfg, 150);
   const srv = startServer(bot, 0);
@@ -245,7 +246,7 @@ test('server: /shadowtrades serves pending + done in the paging envelope; /state
     assert.equal(dflt.done.length, 1);
     assert.equal(dflt.done[0].id, 'x-done');
     assert.equal(dflt.done[0].status, 'exited');
-    assert.match(dflt.done[0].exitReason, /stall exit/);
+    assert.match(dflt.done[0].exitReason, /entry clip/);
     assert.equal(dflt.done[0].pnlBasis, 'viewQuote');
     const pg = await get('/shadowtrades?limit=1&offset=0');
     assert.equal(pg.total, 1);

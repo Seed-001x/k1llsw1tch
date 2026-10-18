@@ -593,6 +593,17 @@ export function loadConfig(env = process.env) {
     stallExit: num(env, 'STALL_EXIT', 1),                 // kill switch: 0 = no general downside exit pre-TP2 besides liquidity death (the owner's chosen shape if flipped)
     stallExitMinAgeSec: num(env, 'STALL_EXIT_MIN_AGE_SEC', 180), // the "3M": the rule does not exist for a younger position — no pending can stamp
     stallExitConfirmSec: num(env, 'STALL_EXIT_CONFIRM_SEC', 60), // the "60 sec confirm": dead flow must still hold this long after the pending stamps, judged on the first check at/after the lapse
+    // ENTRY CLIP (owner order 2026-10-18 17:56 EDT, "adding the 3m timer at
+    // the entry stall point like we had before — −7% we clip out"): the price
+    // counterpart the stall exit deliberately lacks. From ENTRY_CLIP_SEC of
+    // age, a pre-TP1 position whose round-trip move sits at/below
+    // −ENTRY_CLIP_PCT sells in full — no flow conjunction, no confirm: the
+    // entry had its 3 minutes and is underwater by his line. TP1 banking
+    // removes a position from scope (the entry proved itself; the middle
+    // and moonbag judges own it from there). Exits.js section 5a.
+    entryClip: num(env, 'ENTRY_CLIP', 1),                 // kill switch: 0 = no entry clip
+    entryClipSec: num(env, 'ENTRY_CLIP_SEC', 180),        // the "3m timer": the rule does not exist for a younger position
+    entryClipPct: num(env, 'ENTRY_CLIP_PCT', 0.07),       // the "−7%": clip line on the round-trip move vs entry
     // DEATH DETECTOR (owner design 2026-10-17 ~18:37 EDT, "put it to a test
     // with a .02 buy with our last funds"; combination rule delegated to the
     // agent): NOT a stop-loss — no price floor, no arming on targets, PnL is
@@ -807,6 +818,9 @@ export function validateConfig(cfg) {
   if (cfg.stallExit < 0 || cfg.stallExit > 1) errs.push('STALL_EXIT must be 0 or 1');
   if (cfg.stallExitMinAgeSec < 0 || cfg.stallExitMinAgeSec > 3600) errs.push('STALL_EXIT_MIN_AGE_SEC must be between 0 and 3600');
   if (cfg.stallExitConfirmSec < 0 || cfg.stallExitConfirmSec > 600) errs.push('STALL_EXIT_CONFIRM_SEC must be between 0 and 600');
+  if (cfg.entryClip < 0 || cfg.entryClip > 1) errs.push('ENTRY_CLIP must be 0 or 1');
+  if (cfg.entryClipSec < 0 || cfg.entryClipSec > 3600) errs.push('ENTRY_CLIP_SEC must be between 0 and 3600');
+  if (cfg.entryClipPct < 0 || cfg.entryClipPct > 0.9) errs.push('ENTRY_CLIP_PCT must be between 0 and 0.9');
   if (cfg.stopXcheckPct < 0.05 || cfg.stopXcheckPct > 0.9) errs.push('STOP_XCHECK_PCT must be between 0.05 and 0.9');
   if (cfg.extMaxFromBase < 0 || cfg.extMaxFromBase > 20) errs.push('EXT_MAX_FROM_BASE must be between 0 and 20 (0 = off)');
   if (cfg.paceRelax < 0 || cfg.paceRelax > 1) errs.push('PACE_RELAX must be 0 or 1');

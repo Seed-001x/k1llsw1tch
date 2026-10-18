@@ -11,8 +11,13 @@ import { testCfg } from './helpers.mjs';
 // they cannot fire under their former trigger conditions, with their knobs at
 // live values. Dead flow survives ONLY as a post-TP2 exit (deadflow.test.mjs).
 // What remains live: the TP ladder, the post-TP1 middle trail, TP2 rejection,
-// the stall exit and liquidity death.
-const cfg = testCfg({ stallProbationSec: 0, bagTrailConfirmSec: 0 }); const NOW = 1_000_000_000_000; // trail timer off here: this file pins the trail's line, the timer itself is pinned in bagtrailconfirm.test.mjs
+// the stall exit and liquidity death. The ENTRY CLIP (owner order 2026-10-18,
+// exits.js 5a) is live too, but this file pins the STRIPPED rules, so the
+// shared cfg switches it off (entryClip: 0) — its own behavior is pinned in
+// entryclip.test.mjs; with it on, every deep-red print below would sell as a
+// clip instead of holding, which is the clip working, not a stripped rule
+// firing.
+const cfg = testCfg({ stallProbationSec: 0, bagTrailConfirmSec: 0, entryClip: 0 }); const NOW = 1_000_000_000_000; // trail timer off here: this file pins the trail's line, the timer itself is pinned in bagtrailconfirm.test.mjs
 const pos = (o = {}) => ({ entrySol: 0.02, remainingFrac: 1, peakRatio: 1, tp1Done: false, entryTs: NOW - 5 * 60000, ...o });
 const mark = (valueSol, o = {}) => ({ valueSol, liqUsd: 200_000, buysM5: 30, sellsM5: 10, solUsd: 150, ...o });
 
