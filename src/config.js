@@ -484,7 +484,7 @@ export function loadConfig(env = process.env) {
     reportEveryTrades: num(env, 'REPORT_EVERY_TRADES', 10), // full report on the dashboard after every N closes
 
     // ---- gates ----
-    requireReportBelowAgeH: num(env, 'REQUIRE_REPORT_BELOW_AGE_H', 6), // young coins with no RugCheck report are blocked
+    requireReportBelowAgeH: num(env, 'REQUIRE_REPORT_BELOW_AGE_H', 1), // young coins with no RugCheck report are blocked below this age. Window was 6h in code / 3h in env until the owner narrowed it (2026-10-18 23:19 EDT, off the UHI post-mortem: its signals kept dying on the missing report hours into its run) — "replace the 6hr to 1hr", the mechanism unchanged. The same window also governs the young-coin holders floor in gate.js.
     minHolders: num(env, 'MIN_HOLDERS', 100),
     linkedDumpMaxDrain: num(env, 'LINKED_DUMP_MAX_DRAIN', 0.35),
     creatorMaxDrain: num(env, 'CREATOR_MAX_DRAIN', 0.25), // creator-dump gate cap (was hardcoded 0.25 in gate.js)

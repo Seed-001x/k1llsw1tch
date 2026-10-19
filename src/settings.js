@@ -49,6 +49,7 @@ export const SETTINGS_SCHEMA = [
   { key: 'maxMc', label: 'Max market cap ($)', group: 'Entry numbers', type: 'num', min: 0, max: 100000000, hint: 'no buys above this cap on any door' },
   { key: 'trendEntryMaxSignals', label: 'Trend entry max signals', group: 'Entry numbers', type: 'int', min: 1, max: 20, hint: 'a trend signal may buy directly only while it is among the mint’s first N trend signals' },
   { key: 'maxCoinAgeDays', label: 'Max coin age (days)', group: 'Entry numbers', type: 'int', min: 0, max: 365, hint: 'no buys on coins already this old; 0 = off' },
+  { key: 'requireReportBelowAgeH', label: 'Report required below age (hrs)', group: 'Entry numbers', type: 'num', min: 0, max: 72, hint: 'coins younger than this need a RugCheck report to buy' },
   // Exits
   { key: 'tp1Pct', label: 'TP1 arm (gain fraction)', group: 'Exits', type: 'num', min: 0.01, max: 3, hint: '0.19 = +19%' },
   { key: 'tp1Frac', label: 'TP1 bank fraction', group: 'Exits', type: 'num', min: 0.05, max: 1, hint: 'share of the position banked at TP1' },
