@@ -3,9 +3,16 @@
 // plus the matching open's entry fields. TOKEN-PROTECTED, not public (the
 // owner's explicit override of the brief's public export): gated by the
 // admin key exactly like /settings — 401 without it, 200 with it.
+// The record source is the ARCHIVE ∪ HOT union (allTradesForExport): the
+// rotation (src/archive.js, live since 2026-10-18) files finalized records
+// older than 7 days out of the hot file, so a hot-only export silently
+// drops every archived close — that hole is the pin this file guards.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startServer, buildClosesCsv, csvCell } from '../src/server.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import zlib from 'node:zlib';
+import { startServer, buildClosesCsv, csvCell, readArchivedTrades, allTradesForExport } from '../src/server.js';
 import { testCfg, tmp } from './helpers.mjs';
 
 // Minimal RFC-4180 reader for assertions (quoted cells, "" escapes,
@@ -83,9 +90,64 @@ test('buildClosesCsv: a close whose id drifted still joins the latest open of it
   assert.equal(buildClosesCsv([{ type: 'open', id: 'o', mint: 'M', ts: 1 }]), '\r\n');
 });
 
+// ---- the archive ∪ hot union ----
+const ARCH_OPEN = { type: 'open', id: 'a1', mint: 'OLDC', symbol: 'OLD', setup: 'pop', entrySol: 0.1, sig: 'old-sig', ts: 100 };
+const ARCH_CLOSE = { type: 'close', id: 'a1', mint: 'OLDC', symbol: 'OLD', ts: 200, pnlSol: 0.02, reason: 'archived close' };
+const HOT_OPEN = { type: 'open', id: 'h1', mint: 'NEWC', symbol: 'NEW', setup: 'pop', entrySol: 0.1, sig: 'new-sig', ts: 9000 };
+const HOT_CLOSE = { type: 'close', id: 'h1', mint: 'NEWC', symbol: 'NEW', ts: 9500, pnlSol: 0.01, reason: 'hot close' };
+
+// Write the archived pair as TWO concatenated gzip members (exactly how
+// archive.js appends rotation runs onto trades.jsonl.gz).
+function writeArchive(journalDir, lines) {
+  const half = Math.ceil(lines.length / 2);
+  const members = [lines.slice(0, half), lines.slice(half)];
+  const gzDir = path.join(journalDir, 'archive');
+  fs.mkdirSync(gzDir, { recursive: true });
+  fs.writeFileSync(path.join(gzDir, 'trades.jsonl.gz'), Buffer.concat(members.map(m => zlib.gzipSync(m.map(l => JSON.stringify(l) + '\n').join('')))));
+}
+
+test('archive: multi-member trades.jsonl.gz reads back every record', () => {
+  const dir = tmp();
+  writeArchive(dir, [ARCH_OPEN, ARCH_CLOSE]);
+  const recs = readArchivedTrades(dir);
+  assert.equal(recs.length, 2, 'both gzip members read');
+  assert.deepEqual(recs.map(r => r.id), ['a1', 'a1']);
+});
+
+test('archive: absent archive falls back to hot-only without erroring', () => {
+  assert.deepEqual(readArchivedTrades(tmp()), []);
+  assert.deepEqual(readArchivedTrades('/no/such/dir'), []);
+});
+
+test('union: hot + archived merge, de-duped, oldest first', () => {
+  const dir = tmp();
+  writeArchive(dir, [ARCH_OPEN, ARCH_CLOSE]);
+  const journal = { dir, trades: [HOT_OPEN, HOT_CLOSE, { ...ARCH_CLOSE }] }; // ARCH_CLOSE also hot: a crash-recovery overlap
+  const merged = allTradesForExport(journal);
+  assert.equal(merged.length, 4, 'the archived close is not double-counted');
+  assert.deepEqual(merged.map(r => r.id), ['a1', 'a1', 'h1', 'h1'], 'oldest first');
+  // journal without a dir (older stubs) → hot-only
+  assert.deepEqual(allTradesForExport({ trades: [HOT_CLOSE] }), [HOT_CLOSE]);
+});
+
+test('union: a close whose open+close pair lives ONLY in the archive exports with its entry fields', () => {
+  const dir = tmp();
+  writeArchive(dir, [ARCH_OPEN, ARCH_CLOSE]);
+  const rows = [];
+  const csv = buildClosesCsv(allTradesForExport({ dir, trades: [] }));
+  for (const row of csv.trim().split('\r\n')) rows.push(row);
+  const hdr = rows[0].split(',');
+  assert.equal(rows.length, 2, 'the archive-only close is a row');
+  const iSig = hdr.indexOf('entry.sig');
+  assert.ok(iSig >= 0);
+  const cells = rows[1].split(',');
+  assert.equal(cells[hdr.indexOf('id')], 'a1');
+  assert.equal(cells[iSig], 'old-sig', 'the archived open joins the archived close');
+});
+
 // ---- the HTTP surface ----
-function stubBot(dir) {
-  return { cfg: testCfg({ dataDir: dir }), positions: [], journal: { trades: TRADES, tradeReports: [] } };
+function stubBot(dir, journalDir) {
+  return { cfg: testCfg({ dataDir: dir }), positions: [], journal: { dir: journalDir || dir, trades: TRADES, tradeReports: [] } };
 }
 
 test('GET /export/closes.csv refuses without the admin key and serves CSV with it', async () => {
@@ -102,5 +164,24 @@ test('GET /export/closes.csv refuses without the admin key and serves CSV with i
     const rows = parseCsv(await r.text());
     assert.equal(rows.length, 4, 'header + 3 closes over the wire');
     assert.equal(rows[1][rows[0].indexOf('id')], 'p1');
+  } finally { srv.close(); delete process.env.ADMIN_KEY; }
+});
+
+test('GET /export/closes.csv includes closes filed in the archive (hot-only would miss them)', async () => {
+  const dir = tmp();
+  const journalDir = tmp();
+  writeArchive(journalDir, [ARCH_OPEN, ARCH_CLOSE]);
+  const bot = stubBot(dir, journalDir); // hot journal holds only TRADES; a1 lives solely in the archive
+  process.env.ADMIN_KEY = 'test-key';
+  const srv = startServer(bot, 0);
+  try {
+    const base = `http://127.0.0.1:${srv.address().port}`;
+    const r = await fetch(base + '/export/closes.csv', { headers: { 'x-admin-key': 'test-key' } });
+    assert.equal(r.status, 200);
+    const rows = parseCsv(await r.text());
+    assert.equal(rows.length, 5, 'header + 3 hot closes + the archived close');
+    const archived = rows.find(x => x[rows[0].indexOf('id')] === 'a1');
+    assert.ok(archived, 'archives-only close exported');
+    assert.equal(archived[rows[0].indexOf('entry.sig')], 'old-sig', 'its archived open joins it over the wire');
   } finally { srv.close(); delete process.env.ADMIN_KEY; }
 });

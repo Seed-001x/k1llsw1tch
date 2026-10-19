@@ -4,6 +4,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { listState } from './pumpLists.js';
 import { EXIT_REASONS, EXIT_REASON_LABELS, learnReport } from './learn.js';
 import { sanitizeSettings, applySettings, settingsView, saveSettingsOverlay } from './settings.js';
@@ -31,8 +32,55 @@ export function csvCell(v) {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-/** Build the closes CSV (owner order 2026-10-19): one row per journal CLOSE
- *  record, oldest first, carrying every close field plus every field of the
+/** Read + parse the archived trade records: the rotation's output at
+ *  <journalDir>/archive/trades.jsonl.gz (src/archive.js) — the exact
+ *  original journal lines as a multi-member gzip (Node's gunzip reads
+ *  every member). Absent or unreadable archive -> [] (hot-only export),
+ *  never an error. */
+export function readArchivedTrades(journalDir) {
+  try {
+    const gz = path.join(journalDir, 'archive', 'trades.jsonl.gz');
+    if (!fs.existsSync(gz)) return [];
+    const text = zlib.gunzipSync(fs.readFileSync(gz)).toString('utf8');
+    const out = [];
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue;
+      try { out.push(JSON.parse(line)); } catch { /* torn line — skip */ }
+    }
+    return out;
+  } catch { return []; }
+}
+
+const tradeIdentity = (t) => [t.type, t.id, t.ts, t.mint, t.fraction ?? '', t.solOut ?? ''].join('|');
+
+/** The export's record source: the UNION of the rotated archive and the
+ *  hot in-memory trades, de-duplicated by record identity, oldest first.
+ *  bot.journal.trades alone is NOT the full history — the boot loader
+ *  reads only the hot file's tail, and rotation (live since 2026-10-18)
+ *  files finalized records older than 7 days into the archive, so an
+ *  export built on the hot array silently drops every archived close.
+ *  Rotation removes filed lines from the hot file, so the sets are
+ *  normally disjoint; the dedupe covers a crash-recovery overlap. */
+export function allTradesForExport(journal) {
+  const hot = (journal && journal.trades) || [];
+  const archived = journal && journal.dir ? readArchivedTrades(journal.dir) : [];
+  if (!archived.length) return hot.slice();
+  const seen = new Set(hot.map(tradeIdentity));
+  const merged = hot.slice();
+  for (const t of archived) {
+    if (!t || typeof t !== 'object') continue;
+    const k = tradeIdentity(t);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    merged.push(t);
+  }
+  merged.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  return merged;
+}
+
+/** Build the closes CSV (owner order 2026-10-19): one row per CLOSE
+ *  record in the full trade history (archive ∪ hot — allTradesForExport),
+ *  oldest first, carrying every close field plus every field of the
  *  matching OPEN record. The join key is the position id (the same key
  *  journal.tagExit / learn use); opens are also indexed by mint as a
  *  fallback for a close whose id drifted, latest open winning. Close
@@ -362,11 +410,13 @@ export function startServer(bot, port) {
       return json(res, 200, bot.structureWatchCard());
     }
     if (req.method === 'GET' && u.pathname === '/export/closes.csv') {
-      // Closes export (owner order 2026-10-19): one CSV row per journal
-      // close — every close field plus the matching open's entry fields
-      // (buildClosesCsv). Admin-key gated above: the full trade history
+      // Closes export (owner order 2026-10-19): one CSV row per close in
+      // the FULL trade history — every close field plus the matching
+      // open's entry fields (buildClosesCsv over allTradesForExport, the
+      // archive ∪ hot union; the hot journal array alone misses every
+      // rotated-out close). Admin-key gated above: the full trade history
       // never leaves without the key. Read-only; nothing here can trade.
-      const csv = buildClosesCsv((bot.journal && bot.journal.trades) || []);
+      const csv = buildClosesCsv(allTradesForExport(bot.journal));
       res.writeHead(200, { 'content-type': 'text/csv', 'access-control-allow-origin': '*' });
       res.end(csv);
       return;
