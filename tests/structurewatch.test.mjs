@@ -16,6 +16,7 @@ import path from 'node:path';
 import {
   StructureWatch, findConfirmedSwings, detectHigherLows, scoreMark, completedCandles,
   buildStructureCard, foldStructureJournal, pickTrendSeeds, STRUCTURE_MAX_WATCHES, STRUCTURE_TREND_RESERVE,
+  HOLDER_FIX_BOUNDARY_TS,
 } from '../src/structureWatch.js';
 import { Journal } from '../src/journal.js';
 import { Bot } from '../src/bot.js';
@@ -279,9 +280,13 @@ test('structure: a watch expires at 4h and the mint can re-seed afterwards', asy
 
 // ---- holder split + ordinal buckets (pure card) ----
 test('structure: holder split buckets growing / flat / shrinking / unknown; ordinals bucket 1 / 2 / 3+', () => {
-  const seed = (watchId, mint) => ({ type: 'seed', watchId, ts: T0, mint, symbol: 'X', setup: 'pop', decision: 'skipped' });
-  const mark = (markId, watchId, ordinal, growth) => ({ type: 'mark', markId, watchId, ordinal, ts: T0 + 3600e3, mint: 'M', symbol: 'X', price: 1, lowPrev: 1, lowNew: 1.1, lowTs: 1, holdersAtSeed: 100, holdersAtMark: null, holderGrowthPct: growth });
-  const score = (markId, r60, peakPct) => ({ type: 'mark-score', markId, watchId: 'w', ts: T0 + 7200e3, r15: 0, r60, r240: null, peakPct, worstDipPct: -0.1, final: true });
+  // Fixtures live in the POST-FIX era (base = a day past the holder-fix
+  // boundary): this test pins the bucketing math for normal marks. The
+  // legacy-era exclusion has its own test below.
+  const B0 = HOLDER_FIX_BOUNDARY_TS + 24 * 3600e3;
+  const seed = (watchId, mint) => ({ type: 'seed', watchId, ts: B0, mint, symbol: 'X', setup: 'pop', decision: 'skipped' });
+  const mark = (markId, watchId, ordinal, growth) => ({ type: 'mark', markId, watchId, ordinal, ts: B0 + 3600e3, mint: 'M', symbol: 'X', price: 1, lowPrev: 1, lowNew: 1.1, lowTs: 1, holdersAtSeed: 100, holdersAtMark: null, holderGrowthPct: growth });
+  const score = (markId, r60, peakPct) => ({ type: 'mark-score', markId, watchId: 'w', ts: B0 + 7200e3, r15: 0, r60, r240: null, peakPct, worstDipPct: -0.1, final: true });
   const records = [
     seed('w1', 'A'), seed('w2', 'B'), seed('w3', 'C'), seed('w4', 'D'), seed('w5', 'E'),
     mark('w1-m1', 'w1', 1, 0.08), score('w1-m1', 0.10, 0.60),
@@ -289,9 +294,9 @@ test('structure: holder split buckets growing / flat / shrinking / unknown; ordi
     mark('w3-m1', 'w3', 1, -0.09), score('w3-m1', 0.20, 0.80),
     mark('w4-m1', 'w4', 1, null), score('w4-m1', 0.30, 0.55),
     mark('w5-m3', 'w5', 3, null),
-    { type: 'sample', watchId: 'w1', ts: T0, price: 1, holders: 100, holderTried: true },
-    { type: 'sample', watchId: 'w1', ts: T0 + 300e3, price: 1, holders: 108, holderTried: true },
-    { type: 'skip', ts: T0, mint: 'Z', reason: 'cap' },
+    { type: 'sample', watchId: 'w1', ts: B0, price: 1, holders: 100, holderTried: true },
+    { type: 'sample', watchId: 'w1', ts: B0 + 300e3, price: 1, holders: 108, holderTried: true },
+    { type: 'skip', ts: B0, mint: 'Z', reason: 'cap' },
   ];
   const card = buildStructureCard(records);
   assert.equal(card.watchedTotal, 5);
@@ -308,6 +313,7 @@ test('structure: holder split buckets growing / flat / shrinking / unknown; ordi
   assert.equal(card.holderSplit.shrinking.n, 1);
   assert.equal(card.holderSplit.shrinking.medianR60, 0.20);
   assert.equal(card.holderSplit.unknown, 2);              // both null-growth marks, scored or not
+  assert.equal(card.holderLegacyExcluded, 0);             // post-fix era: nothing is legacy
   assert.equal(card.byOrdinal['1'].n, 4);
   assert.equal(card.byOrdinal['1'].finalized, 4);
   assert.equal(card.byOrdinal['1'].medianR60, 0.15);      // median(−0.05, 0.10, 0.20, 0.30)
@@ -378,6 +384,7 @@ test('structure: HTTP GET /structurewatch serves the empty-state card on a fresh
     assert.deepEqual(card.byOrdinal['1'], { n: 0, finalized: 0, medianR60: null, medianPeak: null, sharePeak50: null });
     assert.deepEqual(card.byOrdinal['3+'], { n: 0, finalized: 0, medianR60: null, medianPeak: null, sharePeak50: null });
     assert.equal(card.holderSplit.unknown, 0);
+    assert.equal(card.holderLegacyExcluded, 0);
     assert.equal(card.ready, false);
     assert.deepEqual(card.recentMarks, []);
   } finally { srv.close(); }
@@ -466,4 +473,164 @@ test('trend seeds: the bot seeder verifies the mc floor from its own market view
   assert.equal(seeded[0].rec.seedSource, 'trending');
   assert.equal(seeded[0].opts.reserve, STRUCTURE_TREND_RESERVE);
   assert.equal(bot._trendSeedHour.count, 1);
+});
+
+// ---- legacy holder seeds (owner order 2026-10-19): boot reseed + aggregate exclusion ----
+// The pre-fix sampler pinned every holder seed at 1, so growth computed
+// against it is fiction in both directions (0% pre-fix; +281,700% post-fix
+// on the same watch). The fix: still-active legacy watches are reseeded
+// once at boot ('seed-reseed' journal record; a failed read invalidates
+// the seed instead of keeping the fake 1), and any mark whose growth
+// basis is a legacy seed is excluded from holderSplit and counted in
+// holderLegacyExcluded. Journal history itself is never rewritten.
+const B = HOLDER_FIX_BOUNDARY_TS;
+const writeSw = (dir, rows) => fs.writeFileSync(path.join(dir, 'structure_watch.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+// A legacy watch as journaled before the fix: seeded 2h pre-boundary, its
+// first sample pinned holders at 1, and a mark whose +281,700% "growth"
+// (1 → 2818) is pure sampler fiction. No end record — still active.
+const legacyRows = () => {
+  const seedTs = B - 2 * 3600e3;
+  return [
+    { type: 'seed', watchId: 'sw-legacy-1', ts: seedTs, mint: MINT, symbol: 'LEG', setup: 'pop', decision: 'skipped', seedSource: 'signal', mc: 50000, price: 1 },
+    { type: 'sample', watchId: 'sw-legacy-1', ts: seedTs + 5 * MIN, price: 1, holders: 1, holderTried: true, candleTs: null },
+    { type: 'mark', markId: 'sw-legacy-1-m1', watchId: 'sw-legacy-1', ordinal: 1, ts: seedTs + 40 * MIN, mint: MINT, symbol: 'LEG', seedSource: 'signal', price: 1.1, lowPrev: 1, lowNew: 1.05, lowTs: 42, holdersAtSeed: 1, holdersAtMark: 2818, holderGrowthPct: 2817 },
+    { type: 'mark-score', markId: 'sw-legacy-1-m1', watchId: 'sw-legacy-1', ts: seedTs + 50 * MIN, r15: 0, r60: 0.5, r240: null, peakPct: 0.6, worstDipPct: -0.1, final: true },
+  ];
+};
+
+test('structure legacy: the card excludes legacy-seeded marks from holderSplit and counts them', () => {
+  const D = 24 * 3600e3;
+  const seed = (watchId, mint, ts) => ({ type: 'seed', watchId, ts, mint, symbol: 'X', setup: 'pop', decision: 'skipped' });
+  const sample = (watchId, ts, holders) => ({ type: 'sample', watchId, ts, price: 1, holders, holderTried: true, candleTs: null });
+  const mark = (markId, watchId, ts, growth, seedH) => ({ type: 'mark', markId, watchId, ordinal: 1, ts, mint: 'M', symbol: 'X', price: 1, lowPrev: 1, lowNew: 1.1, lowTs: 1, holdersAtSeed: seedH, holdersAtMark: null, holderGrowthPct: growth });
+  const score = (markId, watchId, ts) => ({ type: 'mark-score', markId, watchId, ts, r15: 0, r60: 0.1, r240: null, peakPct: 0.5, worstDipPct: -0.1, final: true });
+  const records = [
+    // wL: legacy watch. Its pre-reseed marks (fake-flat 0 and fake-huge
+    // 2817) are excluded; the post-reseed mark counts.
+    seed('wL', 'L', B - 7 * D), sample('wL', B - 7 * D + 300e3, 1),
+    mark('wL-m0', 'wL', B - 6 * D, 0, 1), score('wL-m0', 'wL', B - 6 * D + 60e3),
+    mark('wL-m1', 'wL', B - 5 * D, 2817, 1), score('wL-m1', 'wL', B - 5 * D + 60e3),
+    { type: 'seed-reseed', watchId: 'wL', ts: B + 3600e3, mint: 'L', holders: 2500, prevHoldersAtSeed: 1 },
+    mark('wL-m2', 'wL', B + 2 * 3600e3, 0.10, 2500), score('wL-m2', 'wL', B + 2 * 3600e3 + 60e3),
+    // wP: post-fix watch — unaffected.
+    seed('wP', 'P', B + D), sample('wP', B + D + 300e3, 900),
+    mark('wP-m1', 'wP', B + D + 3600e3, -0.20, 900), score('wP-m1', 'wP', B + D + 3600e3 + 60e3),
+    // wN: legacy watch whose mark has null growth — unknown bucket, NOT the legacy count.
+    seed('wN', 'N', B - 7 * D), sample('wN', B - 7 * D + 300e3, 1),
+    mark('wN-m1', 'wN', B - 6 * D, null, 1),
+  ];
+  const card = buildStructureCard(records);
+  assert.equal(card.holderLegacyExcluded, 2);
+  assert.equal(card.holderSplit.growing.n, 1);           // only the post-reseed mark
+  assert.equal(card.holderSplit.growing.medianR60, 0.1);
+  assert.equal(card.holderSplit.shrinking.n, 1);         // the post-fix watch
+  assert.equal(card.holderSplit.flat.n, 0);              // the fake-flat legacy mark is gone
+  assert.equal(card.holderSplit.unknown, 1);
+  assert.equal(card.marks, 5);                           // history itself is untouched
+  assert.equal(card.byOrdinal['1'].n, 5);                // …and non-holder aggregates still see every mark
+});
+
+test('structure legacy: boot reseeds a still-active legacy watch and its later marks use the real seed', async () => {
+  const dir = tmp();
+  const journal = new Journal(dir, { now: () => B + 30 * MIN });
+  writeSw(dir, legacyRows());
+  let t = B + 30 * MIN, holdersNow = 2818;
+  const sw = new StructureWatch({
+    cfg: {}, journal, now: () => t,
+    fetchCandles: async (pool, from, to) => mkCandles(STAIRS).filter(c => c[0] * 1000 <= to),
+    resolvePool: async () => 'POOL',
+    fetchHolders: async () => holdersNow,
+  });
+  await sw.reseedPass;
+  const w = sw.active.get('sw-legacy-1');
+  assert.ok(w, 'the legacy watch is still active');
+  assert.equal(w.holdersAtSeed, 2818, 'the fake seed of 1 was replaced by a fresh sample');
+  assert.equal(w.seedReseeded, true);
+  let rows = readSw(dir);
+  const reseeds = rows.filter(r => r.type === 'seed-reseed');
+  assert.equal(reseeds.length, 1);
+  assert.equal(reseeds[0].holders, 2818);
+  assert.equal(reseeds[0].prevHoldersAtSeed, 1);
+  // The fake mark is excluded from the split even before any new mark lands.
+  let card = sw.scorecard();
+  assert.equal(card.holderLegacyExcluded, 1);
+  assert.equal(card.holderSplit.growing.n, 0);
+  // New marks compute growth against the RESEEDED seed (2818 → 3100 = +10%).
+  holdersNow = 3100;
+  await sw.tick(t);
+  await flush();
+  rows = readSw(dir);
+  const fresh = rows.filter(r => r.type === 'mark' && r.markId !== 'sw-legacy-1-m1');
+  assert.equal(fresh.length, 2);
+  assert.ok(fresh.every(m => m.holdersAtSeed === 2818), 'marks stamp the reseeded seed, not the fake 1');
+  assert.ok(fresh.every(m => m.holderGrowthPct === 0.1001), 'growth is real: 3100/2818 − 1, rounded to 4dp');
+  t = B + 32 * MIN; // step past the 60s card cache
+  card = sw.scorecard();
+  assert.equal(card.holderSplit.growing.n, 2);
+  assert.equal(card.holderLegacyExcluded, 1, 'the historical fake mark stays excluded — history is not rewritten');
+});
+
+test('structure legacy: a failed reseed invalidates the seed — marks go unknown until a real sample lands', async () => {
+  const dir = tmp();
+  const journal = new Journal(dir, { now: () => B + 30 * MIN });
+  writeSw(dir, legacyRows());
+  let t = B + 30 * MIN, holdersNow = null;
+  // Candles ending near "now" so the watch survives its samples (no candle-gap death).
+  const startSec = Math.floor((B + 30 * MIN) / 1000) - 13 * 300;
+  const sw = new StructureWatch({
+    cfg: {}, journal, now: () => t,
+    fetchCandles: async (pool, from, to) => mkCandles(STAIRS, startSec).filter(c => c[0] * 1000 <= to),
+    resolvePool: async () => 'POOL',
+    fetchHolders: async () => holdersNow,
+  });
+  await sw.reseedPass;
+  const w = sw.active.get('sw-legacy-1');
+  assert.equal(w.holdersAtSeed, null, 'failed reseed invalidates — never falls back to the fake 1');
+  assert.equal(w.seedInvalid, true);
+  const reseeds = readSw(dir).filter(r => r.type === 'seed-reseed');
+  assert.equal(reseeds.length, 1);
+  assert.equal(reseeds[0].holders, null);
+  assert.equal(reseeds[0].prevHoldersAtSeed, 1);
+  // A mark confirmed while the seed is invalid carries null growth (unknown bucket).
+  await sw.tick(t);
+  await flush();
+  const fresh = readSw(dir).filter(r => r.type === 'mark' && r.markId !== 'sw-legacy-1-m1');
+  assert.equal(fresh.length, 1);
+  assert.ok(fresh.every(m => m.holdersAtSeed === null && m.holderGrowthPct === null));
+  const card = sw.scorecard();
+  assert.equal(card.holderLegacyExcluded, 1, 'only the historical fake mark is legacy-excluded');
+  assert.equal(card.holderSplit.unknown, 1);
+  assert.equal(card.holderSplit.growing.n, 0);
+  // A later successful sample establishes a real seed ("until a valid seed exists").
+  holdersNow = 1500;
+  t = B + 36 * MIN;
+  await sw.tick(t);
+  await flush();
+  assert.equal(w.holdersAtSeed, 1500);
+  assert.equal(w.seedInvalid, false);
+});
+
+test('structure legacy: a post-fix watch is never reseeded and its marks count normally', async () => {
+  const dir = tmp();
+  const journal = new Journal(dir, { now: () => B + 3 * 3600e3 });
+  const seedTs = B + 3600e3;
+  writeSw(dir, [
+    { type: 'seed', watchId: 'sw-post-1', ts: seedTs, mint: MINT, symbol: 'PST', setup: 'pop', decision: 'skipped', seedSource: 'signal', mc: 50000, price: 1 },
+    { type: 'sample', watchId: 'sw-post-1', ts: seedTs + 5 * MIN, price: 1, holders: 900, holderTried: true, candleTs: null },
+    { type: 'mark', markId: 'sw-post-1-m1', watchId: 'sw-post-1', ordinal: 1, ts: seedTs + 40 * MIN, mint: MINT, symbol: 'PST', seedSource: 'signal', price: 1.1, lowPrev: 1, lowNew: 1.05, lowTs: 7, holdersAtSeed: 900, holdersAtMark: 1080, holderGrowthPct: 0.2 },
+    { type: 'mark-score', markId: 'sw-post-1-m1', watchId: 'sw-post-1', ts: seedTs + 50 * MIN, r15: 0, r60: 0.3, r240: null, peakPct: 0.4, worstDipPct: -0.05, final: true },
+  ]);
+  const sw = new StructureWatch({
+    cfg: {}, journal, now: () => B + 3 * 3600e3,
+    fetchCandles: async () => [], resolvePool: async () => 'POOL', fetchHolders: async () => 9999,
+  });
+  await sw.reseedPass;
+  const w = sw.active.get('sw-post-1');
+  assert.ok(w, 'post-fix watch restored active (2h into its 4h life)');
+  assert.equal(w.holdersAtSeed, 900, 'real seed untouched');
+  assert.equal(w.seedReseeded, false);
+  assert.equal(readSw(dir).filter(r => r.type === 'seed-reseed').length, 0, 'no reseed record for a post-fix watch');
+  const card = sw.scorecard();
+  assert.equal(card.holderSplit.growing.n, 1);
+  assert.equal(card.holderLegacyExcluded, 0);
 });

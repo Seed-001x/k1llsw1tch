@@ -47,6 +47,19 @@ const GROWING = 0.05, SHRINKING = -0.05;      // holder-growth split thresholds 
 const PER_TICK_MAX = 3;                       // samples per poll tick (spreads GT/DAS load)
 const CARD_CACHE_MS = 60000;
 
+// HOLDER-FIX BOUNDARY (owner order 2026-10-19): the instant the fixed DAS
+// holder sampler went live — Render deploy dep-dbba34brjlhs73dg4pqg
+// (commit b96bfb4) finishedAt 2026-10-19T23:04:07.844Z, read from the
+// Render API. Every holder seed sampled BEFORE this instant came from the
+// pinned-at-page-size sampler (effectively always 1), so holder growth
+// computed against it is fiction (a live mark read 2,818 holders against a
+// seed of 1 = +281,700%). Such seeds are LEGACY: still-active legacy
+// watches are reseeded once at boot with the fixed sampler (journaled as
+// 'seed-reseed'; a failed read invalidates the seed instead of keeping the
+// fake 1), and marks whose growth basis is a legacy seed are excluded
+// from every holder-trend aggregate (counted in holderLegacyExcluded).
+export const HOLDER_FIX_BOUNDARY_TS = 1792451047844; // 2026-10-19T23:04:07.844Z
+
 // ---------- pure staircase engine (tested directly) ----------
 
 /** Only candles whose 5m window has FULLY closed by nowMs may inform any
@@ -149,20 +162,58 @@ export function scoreMark(candles, mark) {
 // ---------- pure scorecard (tested directly) ----------
 
 /** Fold raw journal lines into the watch/mark/score sets (latest score
- *  per mark wins; first seed/end per watch wins). */
+ *  per mark wins; first seed/end per watch wins). Also tracks each watch's
+ *  holder-SEED EVENTS in journal order — a sample establishes the seed only
+ *  when none is in force (the live watch's own rule: the first non-null
+ *  read, or the first after an invalid reseed wiped it), and a
+ *  'seed-reseed' record replaces it outright — plus, per mark, the seed
+ *  event in force when the mark was journaled (markSeed), which is the
+ *  mark's actual holder-growth basis. */
 export function foldStructureJournal(records) {
   const seeds = new Map(), ends = new Map(), marks = new Map(), scores = new Map();
+  const seedEvents = new Map(); // watchId -> [{ts, holders, kind: 'sample'|'reseed'}]
+  const markSeed = new Map();   // markId -> seed event in force at journal time (or null)
   let samples = 0, holderSamples = 0, skippedCap = 0;
+  const pushSeedEvent = (watchId, ev) => {
+    if (!seedEvents.has(watchId)) seedEvents.set(watchId, []);
+    seedEvents.get(watchId).push(ev);
+  };
   for (const r of records || []) {
     if (!r || !r.type) continue;
     if (r.type === 'seed' && r.watchId) { if (!seeds.has(r.watchId)) seeds.set(r.watchId, r); }
     else if (r.type === 'end' && r.watchId) { if (!ends.has(r.watchId)) ends.set(r.watchId, r); }
-    else if (r.type === 'sample') { samples++; if (r.holderTried) holderSamples++; }
+    else if (r.type === 'sample') {
+      samples++; if (r.holderTried) holderSamples++;
+      if (r.watchId && r.holders != null) {
+        const evs = seedEvents.get(r.watchId) || [];
+        const cur = evs[evs.length - 1];
+        if (!cur || cur.holders == null) pushSeedEvent(r.watchId, { ts: r.ts, holders: r.holders, kind: 'sample' });
+      }
+    }
+    else if (r.type === 'seed-reseed' && r.watchId) pushSeedEvent(r.watchId, { ts: r.ts, holders: r.holders ?? null, kind: 'reseed' });
     else if (r.type === 'skip') skippedCap++;
-    else if (r.type === 'mark' && r.markId) { if (!marks.has(r.markId)) marks.set(r.markId, r); }
+    else if (r.type === 'mark' && r.markId) {
+      if (!marks.has(r.markId)) marks.set(r.markId, r);
+      if (!markSeed.has(r.markId)) {
+        const evs = seedEvents.get(r.watchId) || [];
+        markSeed.set(r.markId, evs.length ? evs[evs.length - 1] : null);
+      }
+    }
     else if (r.type === 'mark-score' && r.markId) scores.set(r.markId, r);
   }
-  return { seeds, ends, marks, scores, samples, holderSamples, skippedCap };
+  return { seeds, ends, marks, scores, samples, holderSamples, skippedCap, seedEvents, markSeed };
+}
+
+/** True when a mark's holder-growth basis is a LEGACY seed: the seed event
+ *  in force when the mark was journaled was a sample taken before the
+ *  holder-fix boundary (the pinned-at-1 era). A successful reseed event —
+ *  or any post-boundary seed — is clean. With no seed event in the folded
+ *  window, a pre-boundary mark's basis was necessarily pre-boundary. (An
+ *  invalid-seed mark never reaches this check: its growth is null and it
+ *  lands in the unknown bucket first.) */
+export function markSeedLegacy(ev, markTs) {
+  if (ev) return ev.kind === 'sample' && ev.ts < HOLDER_FIX_BOUNDARY_TS;
+  return markTs < HOLDER_FIX_BOUNDARY_TS;
 }
 
 function markAgg(items) {
@@ -186,11 +237,17 @@ export function buildStructureCard(records) {
   const byOrdinal = { '1': [], '2': [], '3+': [] };
   for (const x of joined) byOrdinal[x.m.ordinal >= 3 ? '3+' : String(x.m.ordinal || 1)].push(x);
   const split = { growing: [], flat: [], shrinking: [] };
-  let unknown = 0;
+  let unknown = 0, holderLegacyExcluded = 0;
   for (const x of joined) {
     const g = x.m.holderGrowthPct;
-    if (g == null || !Number.isFinite(g)) unknown++;
-    else if (g >= GROWING) split.growing.push(x);
+    if (g == null || !Number.isFinite(g)) { unknown++; continue; }
+    // Legacy-seeded marks never enter the holder split: their growth was
+    // computed against the pinned-at-1 seed and would swamp the real
+    // signal (both the fake-flat pre-fix marks and the fake-huge post-fix
+    // ones). They stay in the journal and in byOrdinal — only the
+    // holder-trend classification excludes them, visibly counted.
+    if (markSeedLegacy(f.markSeed.get(x.m.markId), x.m.ts)) { holderLegacyExcluded++; continue; }
+    if (g >= GROWING) split.growing.push(x);
     else if (g <= SHRINKING) split.shrinking.push(x);
     else split.flat.push(x);
   }
@@ -219,6 +276,7 @@ export function buildStructureCard(records) {
     marksFinalized: joined.filter(x => x.score && x.score.r60 != null).length,
     byOrdinal: { '1': markAgg(byOrdinal['1']), '2': markAgg(byOrdinal['2']), '3+': markAgg(byOrdinal['3+']) },
     holderSplit: { growing: markAgg(split.growing), flat: markAgg(split.flat), shrinking: markAgg(split.shrinking), unknown },
+    holderLegacyExcluded,
     ready: joined.filter(x => x.score && x.score.r60 != null).length >= 30,
     recentMarks,
   };
@@ -287,6 +345,11 @@ export class StructureWatch {
     this.cardCache = null;
     this.cardCacheTs = 0;
     this._restore();
+    // Boot reseed of pre-fix holder seeds (owner order 2026-10-19):
+    // fire-and-forget like seed()'s first sample — the pass is record-only
+    // and fail-silent. The promise is kept on the instance so tests can
+    // await it; production never does.
+    this.reseedPass = this._reseedLegacySeeds();
   }
 
   _file() { return this.journal && this.journal.f ? this.journal.f.swatch : null; }
@@ -327,10 +390,18 @@ export class StructureWatch {
       const w = this._newWatch(seed);
       for (const r of byWatch.get(watchId) || []) {
         if (r.type === 'sample') {
-          if (w.holdersAtSeed == null && r.holders != null) w.holdersAtSeed = r.holders;
+          if (w.holdersAtSeed == null && r.holders != null) { w.holdersAtSeed = r.holders; w.seedSampleTs = r.ts; w.seedInvalid = false; }
           if (r.holders != null) w.lastHolders = r.holders;
           if (r.candleTs != null && (w.lastCandleTs == null || r.candleTs > w.lastCandleTs)) w.lastCandleTs = r.candleTs;
           if (r.ts > w.lastSampleAt) { w.lastSampleAt = r.ts; w.nextSampleAt = r.ts + STRUCTURE_SAMPLE_MS + w.staggerMs; }
+        } else if (r.type === 'seed-reseed') {
+          // A previous boot already retired this watch's legacy seed: the
+          // reseeded value (or the invalidation) is the seed of record —
+          // never resurrect the fake pre-fix sample that precedes it.
+          w.seedReseeded = true;
+          w.seedSampleTs = r.ts;
+          if (r.holders != null) { w.holdersAtSeed = r.holders; w.seedInvalid = false; }
+          else { w.holdersAtSeed = null; w.seedInvalid = true; }
         } else if (r.type === 'mark') {
           w.marksFired.add(r.lowTs);
           w.marks.set(r.markId, r);
@@ -348,11 +419,51 @@ export class StructureWatch {
     return {
       rec: seedRec, pool: null, candles: [],
       holdersAtSeed: null, lastHolders: null,
+      // Holder-seed provenance: when the seed value was sampled, whether a
+      // boot reseed already retired a legacy seed, and whether the seed is
+      // invalid (reseed read failed — marks carry null growth until a
+      // later sample establishes a real seed).
+      seedSampleTs: null, seedReseeded: false, seedInvalid: false,
       lastSampleAt: 0, nextSampleAt: seedRec.ts, lastCandleTs: null,
       staggerMs: this._stagger(),
       marksFired: new Set(), marks: new Map(), scores: new Map(), ordinal: 0,
       sampling: false,
     };
+  }
+
+  /** A watch is legacy-seeded when the sample that established its holder
+   *  seed predates the holder-fix boundary and no reseed has retired it. */
+  _isLegacySeed(w) {
+    return w.holdersAtSeed != null && w.seedSampleTs != null
+      && w.seedSampleTs < HOLDER_FIX_BOUNDARY_TS && !w.seedReseeded;
+  }
+
+  /** Boot pass (owner order 2026-10-19): for each still-active legacy
+   *  watch, take ONE fresh holder sample with the fixed sampler and make
+   *  it the seed of record, journaled as 'seed-reseed' so aggregates can
+   *  tell pre- and post-reseed marks apart. A failed/null read INVALIDATES
+   *  the seed (holdersAtSeed = null): the watch's marks then carry null
+   *  growth — the unknown bucket — until a later sample establishes a
+   *  real seed. The fake pre-fix value is never kept as a fallback. */
+  async _reseedLegacySeeds() {
+    try {
+      for (const w of [...this.active.values()]) {
+        if (!this._isLegacySeed(w)) continue;
+        const prev = w.holdersAtSeed;
+        let fresh = null;
+        try { const h = await this.fetchHolders(w.rec.mint); fresh = Number.isFinite(h) ? h : null; } catch { fresh = null; }
+        // The watch may have ended — or a racing pass already reseeded it —
+        // while the read was in flight.
+        if (!this.active.has(w.rec.watchId) || w.seedReseeded) continue;
+        const ts = this.now();
+        w.seedReseeded = true;
+        w.seedSampleTs = ts;
+        if (fresh != null) { w.holdersAtSeed = fresh; w.seedInvalid = false; }
+        else { w.holdersAtSeed = null; w.seedInvalid = true; }
+        this._append({ type: 'seed-reseed', watchId: w.rec.watchId, ts, mint: w.rec.mint, holders: fresh, prevHoldersAtSeed: prev });
+        if (this.log) this.log(`[structurewatch] ${w.rec.symbol || w.rec.mint}: legacy holder seed ${prev} ${fresh != null ? `reseeded → ${fresh}` : 'invalidated (fresh sample failed)'} — pre-fix seed retired, record only`);
+      }
+    } catch { /* shadow watch — fail silent */ }
   }
 
   /** Seed a watch from a freshly journaled signal record (called from the
@@ -443,7 +554,7 @@ export class StructureWatch {
       try { const h = await this.fetchHolders(w.rec.mint); holders = Number.isFinite(h) ? h : null; } catch { holders = null; }
       if (holders != null) {
         w.lastHolders = holders;
-        if (w.holdersAtSeed == null) w.holdersAtSeed = holders;
+        if (w.holdersAtSeed == null) { w.holdersAtSeed = holders; w.seedSampleTs = n; w.seedInvalid = false; }
       }
       this.stats.samples++;
       this._append({ type: 'sample', watchId: w.rec.watchId, ts: n, price: price ?? null, holders, holderTried: true, candleTs: w.lastCandleTs });
