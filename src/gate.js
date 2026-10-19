@@ -55,28 +55,53 @@ export async function fetchRug(mint, now = Date.now()) {
 }
 
 // Holder-count sampling, second source (record-only, 2026-10-14): Helius DAS
-// getTokenAccounts with limit 1 — the response's `total` is the mint's
-// token-account count, so one call prices the whole series point without
-// paging accounts. It rides the SAME Helius endpoint + key the bot already
+// getTokenAccounts. It rides the SAME Helius endpoint + key the bot already
 // uses (cfg.rpcUrls, via curveChain's rpc helper). Why it exists: RugCheck
 // has no report at all for many young coins, so those mints accumulated zero
 // holder samples and holderGrowth stayed null; DAS indexes Token-2022
 // accounts from a mint's first buy, so every gated evaluation can leave a
-// sample. `total` counts token ACCOUNTS, not unique owners (one ATA per
+// sample. The count is token ACCOUNTS, not unique owners (one ATA per
 // owner per mint is the norm on pump.fun; curve/fee accounts add a small
 // near-constant offset) — accepted, because the field is a growth DELTA over
 // ≥5 min, where a constant offset cancels. FAIL-SILENT by contract: any RPC
-// error, timeout, or implausible total returns null and writes nothing — the
-// caller never branches on the result. The HOLDER_DAS knob is enforced at
-// the bot's call sites (cfg.holderDas), not here.
+// error, timeout, or implausible reading returns null and writes nothing —
+// the caller never branches on the result. The HOLDER_DAS knob is enforced
+// at the bot's call sites (cfg.holderDas), not here.
+//
+// PINNED-AT-1 BUG (diagnosed live 2026-10-19, the Structure Watch holder
+// bug): the original read asked for limit 1 and trusted result.total as the
+// mint's account count. On the live DAS endpoint `total` is the size of the
+// RETURNED PAGE — limit 1 → total 1, limit 100 → total 100, no limit →
+// total 1000 (default page), verified against USDC and a live runner — so
+// every mint "had" exactly 1 holder, holder growth computed 0% forever and
+// the Structure Watch's holderSplit classified every mark 'flat'. The
+// endpoint is cursor-paginated (limit ≤ 1000): the true count is the SUM
+// of token_accounts lengths over a full cursor walk. The walk is capped at
+// DAS_MAX_PAGES pages; a walk that cannot finish inside the cap (or whose
+// cursor stops advancing) returns null — unknown, never a pinned partial.
+const DAS_PAGE_LIMIT = 1000; // the endpoint rejects larger limits
+const DAS_MAX_PAGES = 20;     // ≤ 20,000 accounts per sample read
 export async function fetchHolderCount(mint, { rpcUrls, now = Date.now(), timeout = 8000 } = {}) {
   if (!mint || !rpcUrls || !rpcUrls.length) return null;
   try {
-    const result = await rpc(rpcUrls, 'getTokenAccounts', { mint, limit: 1 }, timeout);
-    const total = result ? Number(result.total) : NaN;
-    if (!Number.isFinite(total) || total <= 0) return null;
-    noteHolderCount(mint, now, total);
-    return total;
+    let count = 0, cursor = null;
+    const seenCursors = new Set();
+    for (let page = 0; ; page++) {
+      const params = { mint, limit: DAS_PAGE_LIMIT };
+      if (cursor) params.cursor = cursor;
+      const result = await rpc(rpcUrls, 'getTokenAccounts', params, timeout);
+      const accounts = result && Array.isArray(result.token_accounts) ? result.token_accounts : null;
+      if (!accounts) return null;
+      count += accounts.length;
+      const next = result && typeof result.cursor === 'string' && result.cursor ? result.cursor : null;
+      if (!next || accounts.length < DAS_PAGE_LIMIT) break; // last page reached — walk complete
+      if (seenCursors.has(next) || page + 1 >= DAS_MAX_PAGES) return null; // no progress / over budget → unknown
+      seenCursors.add(next);
+      cursor = next;
+    }
+    if (!Number.isFinite(count) || count <= 0) return null;
+    noteHolderCount(mint, now, count);
+    return count;
   } catch { return null; }
 }
 

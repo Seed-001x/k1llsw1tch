@@ -2,13 +2,17 @@
 // RECORD-ONLY. Holder samples used to come only from RugCheck reads, so
 // mints with no RugCheck report (the young coins) accumulated zero samples
 // and holderGrowthPerMin was null on ~100% of signals. A Helius DAS
-// getTokenAccounts (limit 1) read now writes token-account counts into the
+// getTokenAccounts read now writes token-account counts into the
 // SAME holder series at the same bot call points. Pins:
 //  (1) a DAS success writes a sample that pairs with a RugCheck sample;
 //  (2) two samples ≥5 min apart → non-null holderGrowthPerMin (math unchanged);
 //  (3) DAS failure/timeout is silent and leaves behavior identical;
 //  (4) HOLDER_DAS=0 → no DAS call is made;
-//  (5) a single DAS sample alone still yields null growth.
+//  (5) a single DAS sample alone still yields null growth;
+//  (6) the count is the SUM of token_accounts over the cursor walk — the
+//      response's `total` field is the page size, NOT the count (the
+//      2026-10-19 pinned-at-1 bug: limit 1 → total 1 on every mint);
+//  (7) a walk that cannot finish (cursor loop / page budget) reads null.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -26,10 +30,15 @@ const M = 60000;
 const RPC = ['https://helius.test'];
 
 // Install a global fetch stub for one test; `das` describes the DAS leg:
-//   { total } → 200 with result.total · { http: 500 } → not-ok · 'throw' →
-//   rejects · { rpcError: true } → 200 with a JSON-RPC error object.
-// RugCheck answers come from `rugHolders` (null → a report without holders).
-function stubNet({ rugHolders = 500, das = { total: 432 } } = {}) {
+//   { accounts: N } → a cursor-paginated mint with N token accounts (pages
+//     of ≤1000, result.total = the PAGE size, exactly like the live
+//     endpoint; `totalField` overrides the total a page reports);
+//   { total } → a malformed page carrying a total but no token_accounts;
+//   { http: 500 } → not-ok · 'throw' → rejects · { rpcError: true } → 200
+//   with a JSON-RPC error object · { loopCursor: true } → pages that never
+//   advance the cursor. RugCheck answers come from `rugHolders`
+//   (null → a report without holders).
+function stubNet({ rugHolders = 500, das = { accounts: 432 } } = {}) {
   const realFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
@@ -43,27 +52,57 @@ function stubNet({ rugHolders = 500, das = { total: 432 } } = {}) {
     if (das === 'throw') throw new Error('network down');
     if (das.http) return { ok: false, status: das.http, json: async () => ({}) };
     if (das.rpcError) return { ok: true, json: async () => ({ jsonrpc: '2.0', id: 1, error: { code: -32601, message: 'method not found' } }) };
-    return { ok: true, json: async () => ({ jsonrpc: '2.0', id: 1, result: { total: das.total, limit: 1, page: 1, token_accounts: [] } }) };
+    if (das.accounts == null) {
+      return { ok: true, json: async () => ({ jsonrpc: '2.0', id: 1, result: { total: das.total, limit: 1, page: 1 } }) };
+    }
+    const totalAccounts = das.accounts;
+    const limit = Math.min((body.params && body.params.limit) || 1000, 1000);
+    const start = body.params && body.params.cursor ? Number(String(body.params.cursor).replace('cur-', '')) || 0 : 0;
+    const n = Math.max(0, Math.min(limit, totalAccounts - start));
+    const end = start + n;
+    const cursor = das.loopCursor ? 'cur-0' : (end < totalAccounts ? `cur-${end}` : null);
+    return { ok: true, json: async () => ({ jsonrpc: '2.0', id: 1, result: { total: das.totalField ?? n, limit, ...(cursor ? { cursor } : {}), token_accounts: Array.from({ length: n }, () => ({})) } }) };
   };
   return { calls, restore: () => { globalThis.fetch = realFetch; } };
 }
 
 // ---------------------------------------------------------- gate level
 
-test('DAS: a successful getTokenAccounts (limit 1) returns result.total and writes a holder sample', async () => {
-  const net = stubNet({ das: { total: 432 } });
+test('DAS: a successful getTokenAccounts walk returns the account count and writes a holder sample', async () => {
+  const net = stubNet({ das: { accounts: 432 } });
   try {
     const n = await fetchHolderCount('DASMINT1', { rpcUrls: RPC, now: T0 });
     assert.equal(n, 432);
     assert.deepEqual(holderSamples('DASMINT1'), [{ ts: T0, holders: 432 }]);
     const dasCall = net.calls.find(c => c.kind === 'das');
     assert.equal(dasCall.body.method, 'getTokenAccounts');
-    assert.deepEqual(dasCall.body.params, { mint: 'DASMINT1', limit: 1 });
+    assert.deepEqual(dasCall.body.params, { mint: 'DASMINT1', limit: 1000 });
+    assert.equal(net.calls.filter(c => c.kind === 'das').length, 1, 'a sub-page mint costs exactly one call');
   } finally { net.restore(); }
 });
 
+test('DAS: the count sums every cursor page — result.total (the page size) is never trusted', async () => {
+  // 2,500 accounts over 3 pages; page 1 reports total=1000, page 3 total=500.
+  const net = stubNet({ das: { accounts: 2500 } });
+  try {
+    const n = await fetchHolderCount('PAGEDMINT', { rpcUrls: RPC, now: T0 });
+    assert.equal(n, 2500);
+    assert.deepEqual(holderSamples('PAGEDMINT'), [{ ts: T0, holders: 2500 }]);
+    const dasCalls = net.calls.filter(c => c.kind === 'das');
+    assert.equal(dasCalls.length, 3, 'one call per page');
+    assert.equal(dasCalls[1].body.params.cursor, 'cur-1000', 'the walk follows the returned cursor');
+    assert.equal(dasCalls[2].body.params.cursor, 'cur-2000');
+  } finally { net.restore(); }
+  // The pinned-at-1 regression shape: a page whose total SAYS 1 while it
+  // actually carries 3 accounts must count 3, not 1.
+  const net2 = stubNet({ das: { accounts: 3, totalField: 1 } });
+  try {
+    assert.equal(await fetchHolderCount('LYINGTOTAL', { rpcUrls: RPC, now: T0 }), 3);
+  } finally { net2.restore(); }
+});
+
 test('DAS: a DAS sample pairs with a RugCheck sample in the same series', async () => {
-  const net = stubNet({ rugHolders: 500, das: { total: 800 } });
+  const net = stubNet({ rugHolders: 500, das: { accounts: 800 } });
   try {
     await fetchRug('PAIRMINT', T0); // RugCheck read at T0 → sample { T0, 500 }
     const n = await fetchHolderCount('PAIRMINT', { rpcUrls: RPC, now: T0 + 6 * M });
@@ -76,11 +115,11 @@ test('DAS: a DAS sample pairs with a RugCheck sample in the same series', async 
 });
 
 test('DAS: two samples ≥5 min apart produce holder growth (signal-fields math unchanged)', async () => {
-  const das = { total: 1000 };
+  const das = { accounts: 1000 };
   const net = stubNet({ das });
   try {
     await fetchHolderCount('GROWTHMINT', { rpcUrls: RPC, now: T0 });
-    das.total = 1300; // the stub reads das.total at call time
+    das.accounts = 1300; // the stub reads das.accounts at call time
     await fetchHolderCount('GROWTHMINT', { rpcUrls: RPC, now: T0 + 10 * M });
     const f = computeSignalFields({ samples: [], view: view({}), holders: holderSamples('GROWTHMINT'), now: T0 + 10 * M });
     assert.equal(f.holderGrowthPerMin, 30);
@@ -89,7 +128,7 @@ test('DAS: two samples ≥5 min apart produce holder growth (signal-fields math 
 });
 
 test('DAS: a single sample alone still yields null growth (two points required)', async () => {
-  const net = stubNet({ das: { total: 250 } });
+  const net = stubNet({ das: { accounts: 250 } });
   try {
     await fetchHolderCount('SOLOMINT', { rpcUrls: RPC, now: T0 });
     assert.equal(holderSamples('SOLOMINT').length, 1);
@@ -100,7 +139,7 @@ test('DAS: a single sample alone still yields null growth (two points required)'
 });
 
 test('DAS: every failure mode is silent — null returned, nothing written, nothing thrown', async () => {
-  for (const [mint, das] of [['FAILHTTP', { http: 500 }], ['FAILTHROW', 'throw'], ['FAILRPC', { rpcError: true }], ['FAILZERO', { total: 0 }], ['FAILNAN', { total: 'abc' }]]) {
+  for (const [mint, das] of [['FAILHTTP', { http: 500 }], ['FAILTHROW', 'throw'], ['FAILRPC', { rpcError: true }], ['FAILZERO', { accounts: 0 }], ['FAILNAN', { total: 'abc' }], ['FAILLOOP', { accounts: 5000, loopCursor: true }], ['FAILHUGE', { accounts: 25000 }]]) {
     const net = stubNet({ das });
     try {
       const n = await fetchHolderCount(mint, { rpcUrls: RPC, now: T0 });

@@ -21,6 +21,57 @@ function saveRealLists() {
   try { fs.writeFileSync(REAL_LISTS_FILE, JSON.stringify(realLists)); } catch {}
 }
 
+/** CSV cell for one value: null/undefined -> empty; objects/arrays ->
+ *  JSON text (nested record fields like gates ride as JSON); scalars pass
+ *  through String(). Quoted (with "" escaping) whenever the text carries a
+ *  quote, comma, or line break. */
+export function csvCell(v) {
+  if (v == null) return '';
+  const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** Build the closes CSV (owner order 2026-10-19): one row per journal CLOSE
+ *  record, oldest first, carrying every close field plus every field of the
+ *  matching OPEN record. The join key is the position id (the same key
+ *  journal.tagExit / learn use); opens are also indexed by mint as a
+ *  fallback for a close whose id drifted, latest open winning. Close
+ *  columns are the union of scalar keys across all closes; entry columns
+ *  are the union of open keys, prefixed `entry.` — except keys the close
+ *  itself already carries (id, mint, symbol, ts, type, setup...), which the
+ *  close's own value owns, so no column ever appears twice. A close with
+ *  no matching open exports with its entry columns empty. */
+export function buildClosesCsv(trades) {
+  const rows = Array.isArray(trades) ? trades : [];
+  const byId = new Map(), byMint = new Map(), closes = [];
+  for (const t of rows) {
+    if (!t || typeof t !== 'object') continue;
+    if (t.type === 'open') {
+      if (t.id != null && !byId.has(t.id)) byId.set(t.id, t);
+      if (t.mint) byMint.set(t.mint, t); // latest open per mint wins the fallback join
+    } else if (t.type === 'close') closes.push(t);
+  }
+  const keysOf = (recs, skip) => {
+    const out = [];
+    for (const r of recs) for (const k of Object.keys(r)) if (!skip.has(k) && !out.includes(k)) out.push(k);
+    return out;
+  };
+  const closeKeys = keysOf(closes, new Set(['entry']));
+  const closeKeySet = new Set(closeKeys);
+  const paired = closes.map(c => byId.get(c.id) || byMint.get(c.mint) || null);
+  const entryKeys = keysOf(paired.filter(Boolean), closeKeySet);
+  const header = [...closeKeys, ...entryKeys.map(k => `entry.${k}`)];
+  const lines = [header.map(csvCell).join(',')];
+  closes.forEach((c, i) => {
+    const o = paired[i];
+    lines.push([
+      ...closeKeys.map(k => csvCell(c[k])),
+      ...entryKeys.map(k => csvCell(o ? o[k] : null)),
+    ].join(','));
+  });
+  return lines.join('\r\n') + '\r\n';
+}
+
 export function startServer(bot, port) {
   const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }); res.end(JSON.stringify(body, null, 2)); };
   // D1 pagination: { limit, offset } when the caller asks to page, else null.
@@ -60,6 +111,12 @@ export function startServer(bot, port) {
     // 2026-10-18: "only me being able to see it") — unlike the view-first
     // dashboard GETs, even READING it requires the admin key.
     if (u.pathname === '/settings' && ADMIN_KEY && req.headers['x-admin-key'] !== ADMIN_KEY) {
+      return json(res, 401, { error: 'admin key required' });
+    }
+    // /export/closes.csv carries the full trade history (owner order
+    // 2026-10-19: token-protected, NOT public — his explicit override of
+    // the overhaul brief's public-export line) — same key gate as /settings.
+    if (u.pathname === '/export/closes.csv' && ADMIN_KEY && req.headers['x-admin-key'] !== ADMIN_KEY) {
       return json(res, 401, { error: 'admin key required' });
     }
     // POST /feedback — human marks a skipped signal as good/bad
@@ -303,6 +360,16 @@ export function startServer(bot, port) {
       // gates, buys, or sells.
       if (!bot.structureWatchCard) return json(res, 200, { enabled: false });
       return json(res, 200, bot.structureWatchCard());
+    }
+    if (req.method === 'GET' && u.pathname === '/export/closes.csv') {
+      // Closes export (owner order 2026-10-19): one CSV row per journal
+      // close — every close field plus the matching open's entry fields
+      // (buildClosesCsv). Admin-key gated above: the full trade history
+      // never leaves without the key. Read-only; nothing here can trade.
+      const csv = buildClosesCsv((bot.journal && bot.journal.trades) || []);
+      res.writeHead(200, { 'content-type': 'text/csv', 'access-control-allow-origin': '*' });
+      res.end(csv);
+      return;
     }
     if (req.method === 'GET' && u.pathname === '/reports') {
       return json(res, 200, (bot.journal.tradeReports || []).slice().reverse());
