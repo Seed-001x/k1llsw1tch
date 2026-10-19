@@ -439,3 +439,31 @@ test('trend seeds: the reserve slice lets trending seeds land past the signal ca
   assert.equal(h.sw.seed(trendRec(99), { reserve: STRUCTURE_TREND_RESERVE }), null, 'the reserve is a cap too, not a bypass');
   assert.equal(h.sw.active.size, STRUCTURE_MAX_WATCHES + STRUCTURE_TREND_RESERVE);
 });
+
+test('trend seeds: the bot seeder verifies the mc floor from its own market views when the list rows carry none', async () => {
+  const dir = tmp();
+  const cfg = testCfg({ dataDir: dir, structureTrendSeed: 1, structureSeedMinMc: 25000, structureTrendSeedPerHour: 12 });
+  const bot = new Bot(cfg, {
+    now: () => T0, exec: { solBalance: async () => 1 },
+    discover: async () => Object.assign(new Map(), { counts: {} }),
+    fetchViews: async () => new Map(), fetchSolUsd: async () => 150, fetchRug: async () => null, searchByName: async () => [],
+  });
+  // A recording stand-in for the watch — the seeder's contract is what it ASKS for.
+  const seeded = [];
+  bot.structureWatch = {
+    active: new Map(), activeMint: new Map(),
+    seed: (rec, opts) => { seeded.push({ rec, opts }); return rec; },
+  };
+  bot.latest.set('MintViewedXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX', { mc: 40000, price: 0.5, symbol: 'VW' });
+  bot._seedStructureFromTrending([
+    { address: 'MintViewedXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX', name: 'Viewed', symbol: 'VW' },   // no mc on the row — the view supplies it
+    { address: 'MintBlindXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX', name: 'Blind', symbol: 'BL' },      // no mc and no view — skipped, retried later
+    { address: 'MintSmallXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX', name: 'Small', symbol: 'SM', usd_market_cap: 9000 }, // readable but under the floor
+  ], T0, new Set());
+  assert.equal(seeded.length, 1);
+  assert.equal(seeded[0].rec.mint, 'MintViewedXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX');
+  assert.equal(seeded[0].rec.mc, 40000);
+  assert.equal(seeded[0].rec.seedSource, 'trending');
+  assert.equal(seeded[0].opts.reserve, STRUCTURE_TREND_RESERVE);
+  assert.equal(bot._trendSeedHour.count, 1);
+});

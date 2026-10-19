@@ -1489,7 +1489,18 @@ export class Bot {
       for (const w of this.structureWatch.active.values()) if (w.rec && w.rec.seedSource === 'trending') trendActive++;
       const room = Math.min(STRUCTURE_TREND_RESERVE - trendActive, STRUCTURE_MAX_WATCHES + STRUCTURE_TREND_RESERVE - this.structureWatch.active.size);
       if (room <= 0) return;
-      const picks = pickTrendSeeds(rows, { minMc: this.cfg.structureSeedMinMc || 0, limit: Math.min(budget, room), exclude: new Set(this.structureWatch.activeMint.keys()) });
+      // The scraped trending rows carry only {address, name, symbol} —
+      // no market cap (first live read, 2026-10-18). The floor still has
+      // to be VERIFIED, so the cap is read from the bot's own latest
+      // market view for the mint instead (fresher than any list field);
+      // a mint with no view yet is skipped this tick and retried on a
+      // later one — it joined the watchlist in this same discover pass.
+      const enriched = (rows || []).map(r => {
+        const mint = r && (r.mint || r.address);
+        const v = mint ? this.latest.get(mint) : null;
+        return { ...r, mc: r.usd_market_cap ?? r.market_cap ?? r.mc ?? (v ? v.mc : undefined), price: r.price ?? (v ? v.price : undefined), symbol: r.symbol || (v ? v.symbol : undefined) };
+      });
+      const picks = pickTrendSeeds(enriched, { minMc: this.cfg.structureSeedMinMc || 0, limit: Math.min(budget, room), exclude: new Set(this.structureWatch.activeMint.keys()) });
       for (const p of picks) {
         if (bl && bl.has(p.mint)) continue;
         const rec = this.structureWatch.seed({ ts: n, mint: p.mint, symbol: p.symbol, mc: p.mc, price: p.price, setup: 'trending', decision: 'seed', seedSource: 'trending' }, { reserve: STRUCTURE_TREND_RESERVE });
