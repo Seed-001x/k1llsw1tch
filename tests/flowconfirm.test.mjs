@@ -35,7 +35,7 @@ const MIN = 60000;
 // onSignal + scripted-quote Executor. baseMode rides loadConfig's
 // default (ON) unless overridden — the lane only exists inside it.
 function pipelineRig({ cfgOver = {}, env = {} } = {}) {
-  const cfg = testCfg({ tradeSol: 0.02, ...cfgOver }, env);
+  const cfg = testCfg({ tradeSol: 0.02, enrollSignals: 1, ...cfgOver }, env); // the lane is judged against enrollment; ENROLL_SIGNALS defaults 0 since the owner's 2026-10-18 removal order
   const clock = { t: T0 };
   // sell-back mock: a full round trip returns 0.024 SOL — a 0.96 ratio at
   // the lane's 0.025 size (the liveflips rig's 0.019 would read 0.76 at

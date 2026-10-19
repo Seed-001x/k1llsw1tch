@@ -591,16 +591,16 @@ test('range live: a mark that never gets a view expires after 5 minutes, counted
   assert.equal(bot.stats.range.noViewFinal, 1);
 });
 
-test('range live: eligible() failure journals a skipped range signal, no onSignal', async () => {
+test('range live: eligible() failure tallies silently (no signal card since the 2026-10-18 declutter order), no onSignal', async () => {
   const { bot, views, calls } = liveRig();
   views.set(MINT, view({ address: MINT, symbol: 'RNG', chgH1: -80 })); // dead bounce — fails the tradability floor
   bot._evalRange(RMARK);
   await flush();
   assert.equal(calls.length, 0);
   const recs = bot.journal.signals.filter(s => s.setup === 'range');
-  assert.equal(recs.length, 1);
-  assert.equal(recs[0].decision, 'skipped');
-  assert.match(recs[0].reasons[0], /range-live:/);
+  assert.equal(recs.length, 0);
+  assert.equal(bot.stats.baseMode.rangeSkips.byKind.eligible, 1);
+  assert.equal(bot.stats.baseMode.rangeSkips.total, 1);
 });
 
 test('range live: the card notes live routing (evals + fired/taken) while aggregates stay mark-based', async () => {
@@ -611,7 +611,7 @@ test('range live: the card notes live routing (evals + fired/taken) while aggreg
   const card = bot.rangeWatchCard();
   assert.equal(card.liveRouting.live, true);
   assert.equal(card.liveRouting.evals, 1);
-  assert.equal(card.liveRouting.signals, 1);   // the eligible-floor skip journaled as a range signal
+  assert.equal(card.liveRouting.signals, 0);   // the eligible-floor verdict tallies silently now — no journaled range signal
   assert.equal(card.liveRouting.taken, 0);
   assert.equal(card.marks, 0);                 // aggregates still judge marks only — the direct eval wrote none
   const off = liveRig({}, { RANGE_LIVE: '0' });

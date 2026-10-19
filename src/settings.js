@@ -36,6 +36,7 @@ export const SETTINGS_SCHEMA = [
   { key: 'rangeLive', label: 'Range entries', group: 'Doors & guards', type: 'toggle' },
   { key: 'flowConfirmLive', label: 'Flow-confirmation lane', group: 'Doors & guards', type: 'toggle', bool: true },
   { key: 'trendEntryLive', label: 'Trend entries (early signals)', group: 'Doors & guards', type: 'toggle' },
+  { key: 'enrollSignals', label: 'Signal enrollment (base watch)', group: 'Doors & guards', type: 'toggle', hint: 'on = signals only watch-list the coin for base entries; off = signals buy directly' },
   { key: 'entryClip', label: 'Entry clip (−7% at 3m)', group: 'Doors & guards', type: 'toggle' },
   { key: 'preEntryCensus', label: 'Pre-entry census', group: 'Doors & guards', type: 'toggle', bool: true },
   { key: 'preEntryVeto', label: 'Pre-entry census veto', group: 'Doors & guards', type: 'toggle', bool: true, hint: 'off = watch + stamp only' },
@@ -45,7 +46,9 @@ export const SETTINGS_SCHEMA = [
   { key: 'baseStaircaseMinVolM5', label: 'Pulse floor — staircase ($)', group: 'Entry numbers', type: 'num', min: 0, max: 100000, hint: '0 = exempt' },
   { key: 'structureSeedMinMc', label: 'Trending-seed MC floor ($)', group: 'Entry numbers', type: 'num', min: 0, max: 1000000 },
   { key: 'minMc', label: 'Min market cap ($)', group: 'Entry numbers', type: 'num', min: 0, max: 500000 },
+  { key: 'maxMc', label: 'Max market cap ($)', group: 'Entry numbers', type: 'num', min: 0, max: 100000000, hint: 'no buys above this cap on any door' },
   { key: 'trendEntryMaxSignals', label: 'Trend entry max signals', group: 'Entry numbers', type: 'int', min: 1, max: 20, hint: 'a trend signal may buy directly only while it is among the mint’s first N trend signals' },
+  { key: 'maxCoinAgeDays', label: 'Max coin age (days)', group: 'Entry numbers', type: 'int', min: 0, max: 365, hint: 'no buys on coins already this old; 0 = off' },
   // Exits
   { key: 'tp1Pct', label: 'TP1 arm (gain fraction)', group: 'Exits', type: 'num', min: 0.01, max: 3, hint: '0.19 = +19%' },
   { key: 'tp1Frac', label: 'TP1 bank fraction', group: 'Exits', type: 'num', min: 0.05, max: 1, hint: 'share of the position banked at TP1' },

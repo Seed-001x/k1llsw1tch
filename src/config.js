@@ -150,6 +150,8 @@ export function loadConfig(env = process.env) {
     baseMode: num(env, 'BASE_MODE', 1),                      // 1 = base strategy on (0 = direct entries as before)
     trendEntryLive: num(env, 'TREND_ENTRY_LIVE', 1),         // TREND ENTRY LANE (owner order 2026-10-18 21:49 EDT): 1 = a trend signal that passed the whole stack may enter directly while it is among the mint's first TREND_ENTRY_MAX_SIGNALS trend signals, instead of only enrolling for base watch; 0 = enrollment only (the pre-lane behavior). Distinct from TREND_LIVE (the shadow-routing flip).
     trendEntryMaxSignals: num(env, 'TREND_ENTRY_MAX_SIGNALS', 2), // the owner's cap: "only the 1 or 2nd time it signals not the 20th"
+    enrollSignals: num(env, 'ENROLL_SIGNALS', 0),            // ENROLLMENT REMOVED (owner order 2026-10-18 22:29 EDT, "make every signal buy directly — no more enrollment"): 0 = a signal that passes the stack buys directly, for every setup — the base-mode demotion to base-watch enrollment does not run. 1 = restores the 2026-10-16 base-mode routing (signals enroll; entries only from formed bases + the bypass lanes). Base doors (staircase/bottom/range) are unaffected either way — they never demoted.
+    maxCoinAgeDays: num(env, 'MAX_COIN_AGE_DAYS', 14),       // AGE CAP (owner order 2026-10-18 22:30 EDT, "no buying 2 week old coins or anything above"): a coin whose pair is already this many days old at signal time never buys, on any door. Judged in onSignal with the other user-ruling vetoes; unknown age (no createdAt on the view) never blocks, the top-guard doctrine. 0 = off.
     // Base-strategy entry gates (owner decision 2026-10-16 23:16 EDT,
     // off tonight's range burst — the range path bought DEAD coins:
     // entry volM5 stamps of $0 / $17 / $137 / $186 / $524 / $958 against
@@ -985,6 +987,8 @@ export function validateConfig(cfg) {
   if (cfg.baseMode < 0 || cfg.baseMode > 1) errs.push('BASE_MODE must be 0 or 1');
   if (cfg.trendEntryLive < 0 || cfg.trendEntryLive > 1) errs.push('TREND_ENTRY_LIVE must be 0 or 1');
   if (cfg.trendEntryMaxSignals < 1 || cfg.trendEntryMaxSignals > 20) errs.push('TREND_ENTRY_MAX_SIGNALS must be between 1 and 20');
+  if (cfg.enrollSignals < 0 || cfg.enrollSignals > 1) errs.push('ENROLL_SIGNALS must be 0 or 1');
+  if (cfg.maxCoinAgeDays < 0 || cfg.maxCoinAgeDays > 365) errs.push('MAX_COIN_AGE_DAYS must be between 0 and 365');
   if (!(cfg.flowConfirmWindowH > 0) || cfg.flowConfirmWindowH > 72) errs.push('FLOW_CONFIRM_WINDOW_H must be > 0 and <= 72');
   if (!(cfg.flowConfirmMinMc >= 0)) errs.push('FLOW_CONFIRM_MIN_MC must be >= 0');
   if (!(cfg.flowConfirmSol > 0) || cfg.flowConfirmSol > 1) errs.push('FLOW_CONFIRM_SOL must be > 0 and <= 1');

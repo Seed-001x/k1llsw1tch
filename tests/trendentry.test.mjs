@@ -25,7 +25,7 @@ function seedHistory(bot, mint, price = 1) {
 }
 
 function pipelineRig({ cfgOver = {}, env = {} } = {}) {
-  const cfg = testCfg({ tradeSol: 0.02, ...cfgOver }, env);
+  const cfg = testCfg({ tradeSol: 0.02, enrollSignals: 1, ...cfgOver }, env); // the lane tests live in the enrollment world; the removal tests below override enrollSignals: 0
   const clock = { t: T0 };
   const q = { valueLam: 19_000_000 };
   const quote = async (input, _o, amount) => (input === SOL_MINT
@@ -42,8 +42,8 @@ function pipelineRig({ cfgOver = {}, env = {} } = {}) {
   return { bot, clock, views, exec };
 }
 
-async function fire(rig, { mint = 'MINTT', setup = 'trend' } = {}) {
-  const v = view({ address: mint, symbol: 'TEST', mc: 500_000, liq: 100_000, createdAt: T0 - 10 * 3600e3, dex: 'pumpswap' });
+async function fire(rig, { mint = 'MINTT', setup = 'trend', createdAt = T0 - 10 * 3600e3 } = {}) {
+  const v = view({ address: mint, symbol: 'TEST', mc: 500_000, liq: 100_000, createdAt, dex: 'pumpswap' });
   rig.views.set(mint, v);
   await rig.bot.start();
   seedHistory(rig.bot, mint);
@@ -129,6 +129,53 @@ test('scope: pop still enrolls untouched; ordinals count only trend records of t
   assert.match((pop.reasons || []).join(' '), /base mode: enrolled/);
   assert.equal(pop.fields.trendOrdinal, undefined);
   assert.equal(rig.bot._trendOrdinal('MINTT'), 1);             // the pop record did not count
+});
+
+test('config: ENROLL_SIGNALS defaults 0 (removal order), MAX_COIN_AGE_DAYS defaults 14, both validate', () => {
+  const d = loadConfig({});
+  assert.equal(d.enrollSignals, 0);
+  assert.equal(d.maxCoinAgeDays, 14);
+  assert.equal(loadConfig({ ENROLL_SIGNALS: '1' }).enrollSignals, 1);
+  assert.equal(loadConfig({ MAX_COIN_AGE_DAYS: '0' }).maxCoinAgeDays, 0);
+  assert.ok(validateConfig(loadConfig({ ENROLL_SIGNALS: '2' })).some(e => e.includes('ENROLL_SIGNALS')));
+  assert.ok(validateConfig(loadConfig({ MAX_COIN_AGE_DAYS: '400' })).some(e => e.includes('MAX_COIN_AGE_DAYS')));
+  assert.ok(!validateConfig(d).some(e => e.includes('ENROLL_SIGNALS') || e.includes('MAX_COIN_AGE_DAYS')));
+});
+
+// ENROLLMENT REMOVED (owner order 2026-10-18 22:29 EDT): with
+// ENROLL_SIGNALS=0 the demotion never runs — every setup that passes the
+// stack buys directly, and the trend ordinal cap has nothing to cap.
+test('no enrollment: pop buys directly, and a fifth trend signal buys too', async () => {
+  const rig = pipelineRig({ cfgOver: { enrollSignals: 0 } });
+  const pop = await fire(rig, { mint: 'MINTP', setup: 'pop' });
+  assert.equal(pop.decision, 'taken');
+  assert.equal(pop.fields.enrolledBy, undefined);
+
+  const rig2 = pipelineRig({ cfgOver: { enrollSignals: 0 } });
+  await rig2.bot.start();
+  seedTrendRecords(rig2.bot, 'MINTT', 5);
+  const fifth = await fire(rig2);
+  assert.equal(fifth.decision, 'taken');
+  assert.equal(fifth.fields.trendOrdinal, 6); // still stamped for the record
+  assert.equal(rig2.bot.stats.baseMode.enrolled, 0);
+});
+
+// AGE CAP (owner order 2026-10-18 22:30 EDT, "no buying 2 week old coins
+// or anything above"): judged in onSignal, so every door inherits it.
+test('age cap: a 15-day-old coin never buys; a 13-day-old coin does; cap off lifts it', async () => {
+  const old = pipelineRig();
+  const recOld = await fire(old, { createdAt: T0 - 15 * 86400e3 });
+  assert.equal(recOld.decision, 'skipped');
+  assert.match((recOld.reasons || []).join(' '), /age cap: coin is 15\.0 days old/);
+  assert.equal(old.bot.positions.length, 0);
+
+  const young = pipelineRig();
+  const recYoung = await fire(young, { createdAt: T0 - 13 * 86400e3 });
+  assert.equal(recYoung.decision, 'taken');
+
+  const off = pipelineRig({ cfgOver: { maxCoinAgeDays: 0 } });
+  const recOff = await fire(off, { createdAt: T0 - 30 * 86400e3 });
+  assert.equal(recOff.decision, 'taken');
 });
 
 test('restart: the ordinal survives a reboot via the journal, and shadow records never count', async () => {

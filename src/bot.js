@@ -244,7 +244,7 @@ export class Bot {
     if (this.stats.deadflow) { this.stats.deadflow.waves = this.stats.deadflow.waves || 0; this.stats.deadflow.floor = this.stats.deadflow.floor || 0; }
     // BASE MODE (owner order 2026-10-16): the tally exists from boot so
     // /state shows the strategy's shape even before the first enrollment.
-    this.stats.baseMode = { enrolled: 0, bySetup: {}, dipWatches: 0, dipEntries: 0, structureStops: 0, pulseSkips: { total: 0, bySetup: {} }, rangeUnenrolled: 0, trendBypass: 0, ...(this.stats.baseMode || {}) };
+    this.stats.baseMode = { enrolled: 0, bySetup: {}, dipWatches: 0, dipEntries: 0, structureStops: 0, pulseSkips: { total: 0, bySetup: {} }, rangeUnenrolled: 0, trendBypass: 0, rangeSkips: { total: 0, byKind: {} }, ...(this.stats.baseMode || {}) };
     // Never-Green Cut shadow tally (record-only, owner 2026-10-17): exists
     // from boot so /state shows the shadow's shape at 0 before its first
     // fire; fires counted at the would-fire, paired/deltaSol at the close
@@ -1999,7 +1999,23 @@ export class Bot {
   // measured on its next signal. Never throws.
   _birthStats() { const s = this.stats.birthMemory || (this.stats.birthMemory = {}); s.blocked = s.blocked || 0; s.written = s.written || 0; s.known = s.known || 0; return s; }
 
-  _baseStats() { const s = this.stats.baseMode || (this.stats.baseMode = { enrolled: 0, bySetup: {}, dipWatches: 0, dipEntries: 0, structureStops: 0, pulseSkips: { total: 0, bySetup: {} }, rangeUnenrolled: 0, trendBypass: 0 }); if (!s.bySetup) s.bySetup = {}; if (!s.pulseSkips) s.pulseSkips = { total: 0, bySetup: {} }; if (!s.pulseSkips.bySetup) s.pulseSkips.bySetup = {}; if (s.trendBypass == null) s.trendBypass = 0; return s; }
+  _baseStats() { const s = this.stats.baseMode || (this.stats.baseMode = { enrolled: 0, bySetup: {}, dipWatches: 0, dipEntries: 0, structureStops: 0, pulseSkips: { total: 0, bySetup: {} }, rangeUnenrolled: 0, trendBypass: 0, rangeSkips: { total: 0, byKind: {} } }); if (!s.bySetup) s.bySetup = {}; if (!s.pulseSkips) s.pulseSkips = { total: 0, bySetup: {} }; if (!s.pulseSkips.bySetup) s.pulseSkips.bySetup = {}; if (s.trendBypass == null) s.trendBypass = 0; if (!s.rangeSkips) s.rangeSkips = { total: 0, byKind: {} }; if (!s.rangeSkips.byKind) s.rangeSkips.byKind = {}; return s; }
+
+  /** RANGE EVAL VERDICTS (owner order 2026-10-18 22:39 EDT — the range
+   *  door's internal rule checks were journaling a signal card for
+   *  every mark they refused, cluttering his Signals tab: "that was
+   *  simply a rule not for it to pop those in the tab"): pre-pipeline
+   *  range verdicts (the eligibility floor, the enrollment nomination,
+   *  the top-third band) tally here and log to the console — they no
+   *  longer journal signal records. A range eval that passes these
+   *  checks still routes into onSignal, whose taken/skipped records
+   *  journal as always. */
+  _rangeEvalSkip(kind, symbol, reasons) {
+    const bm = this._baseStats();
+    bm.rangeSkips.total++;
+    bm.rangeSkips.byKind[kind] = (bm.rangeSkips.byKind[kind] || 0) + 1;
+    console.log(`[range] ${symbol}: ${reasons.join('; ')}`);
+  }
 
   /** TREND ENTRY LANE (owner order 2026-10-18 21:49 EDT): the 1-based
    *  ordinal of the NEXT trend signal for this mint — the count of
@@ -2766,9 +2782,9 @@ export class Bot {
       if (liqFamilyChecks(elc).length === elc.length && this._queueLiqRecheck({
         mint, setup: 'range', v, n,
         resume: (fv, checks) => this._evalRangeWithView(rec, fv, this.now(), { ...opts, liqRechecks: checks }),
-        expire: (fv, checks) => this.skip(fv, { ...sig, liqRechecks: checks }, elc.map(c => `range-live: ${c.reason}`), [], {}),
+        expire: (fv, checks) => this._rangeEvalSkip('eligible', fv.symbol, elc.map(c => `range-live: ${c.reason}`)),
       })) return;
-      this.skip(v, sig, elc.map(c => `range-live: ${c.reason}`), [], {}); return;
+      this._rangeEvalSkip('eligible', v.symbol, elc.map(c => `range-live: ${c.reason}`)); return;
     }
     // ENROLLMENT + PULSE gates (owner decision 2026-10-16 23:16 EDT,
     // off tonight's range burst — the path bought DEAD coins: entry
@@ -2787,11 +2803,10 @@ export class Bot {
     // (volM5 >= BASE_MIN_VOL_M5, unknown counting as dead).
     // Base-strategy machinery: BASE_MODE=0 leaves the range path
     // exactly as it shipped.
-    if (this.cfg.baseMode && !this._baseEnrolled(mint, n)) {
+    if (this.cfg.baseMode && this.cfg.enrollSignals > 0 && !this._baseEnrolled(mint, n)) {
       const bm = this._baseStats();
       bm.rangeUnenrolled = (bm.rangeUnenrolled || 0) + 1;
-      this.skip(v, sig, ['range: coin never enrolled by a signal — base alone is not a nomination'], [], {});
-      console.log(`[range] ${v.symbol}: range mark not enrolled by any signal — no entry (base alone is not a nomination)`);
+      this._rangeEvalSkip('unenrolled', v.symbol, ['range: coin never enrolled by a signal — base alone is not a nomination']);
       return;
     }
     if (this.cfg.baseMode && this._basePulseSkip(v, sig)) return;
@@ -2809,8 +2824,7 @@ export class Bot {
       const frac = rec.rangeHi > rec.rangeLo ? (v.mc - rec.rangeLo) / (rec.rangeHi - rec.rangeLo) : 0; // a zero-width band counts as lower
       if (frac > 2 / 3) {
         if (!opts.deferredDip) this._openRangeDipWatch(rec, n);
-        this.skip(v, sig, ['range top-third — watching for the dip'], [], {});
-        console.log(`[range] ${v.symbol}: range mark in the top third of its band (${(frac * 100).toFixed(0)}% up) — no buy${opts.deferredDip ? ' (deferred attempt spent)' : ', dip watch open'}`);
+        this._rangeEvalSkip('topThird', v.symbol, [`range top-third — watching for the dip (mark in the top third of its band, ${(frac * 100).toFixed(0)}% up — no buy${opts.deferredDip ? ', deferred attempt spent' : ', dip watch open'})`]);
         return;
       }
     }
@@ -3416,6 +3430,23 @@ export class Bot {
       checks.nameblock = { pass: false, reason: `name "${v.name || v.symbol}" contains blocked word "${blockedWord}"` };
       return this.skip(v, sig, [`nameblock: name "${v.name || v.symbol}" contains blocked word "${blockedWord}"`], [], checks);
     }
+    // AGE CAP (owner order 2026-10-18 22:30 EDT, "no buying 2 week old
+    // coins or anything above"): a coin whose pair is already
+    // MAX_COIN_AGE_DAYS old never buys, on any door — every entry route
+    // funnels through onSignal, so this one veto covers direct signals
+    // and the staircase/bottom/range/flow evals alike. Sits with the
+    // other user-ruling vetoes before runGates. A view with no
+    // createdAt cannot be aged, and unknown never blocks (the
+    // top-guard doctrine); 0 = off.
+    if (this.cfg.maxCoinAgeDays > 0 && v.createdAt) {
+      const ageDays = (n - v.createdAt) / 86400000;
+      if (ageDays >= this.cfg.maxCoinAgeDays) {
+        const reason = `coin is ${ageDays.toFixed(1)} days old — over the ${this.cfg.maxCoinAgeDays}-day max age, no buys`;
+        console.log(`[agecap] skip: ${v.symbol} — ${reason}`);
+        checks.ageCap = { pass: false, reason, ageDays: +ageDays.toFixed(2), maxDays: this.cfg.maxCoinAgeDays };
+        return this.skip(v, sig, [`age cap: ${reason}`], [], checks);
+      }
+    }
     // Ran-rebuy block (user 2026-10-15, "for tonight" — RAN_REBUY lifts it):
     // a mint the bot already traded whose coin already printed >= RAN_REBUY_MULT x
     // that trade's entry price (at any point since the entry, the exit
@@ -3803,7 +3834,7 @@ export class Bot {
     if (this.cfg.baseMode && sig.setup === 'trend' && !laneEntry) {
       const ordinal = this._trendOrdinal(v.address);
       sig.trendOrdinal = ordinal;
-      if (this.cfg.trendEntryLive > 0 && ordinal <= (this.cfg.trendEntryMaxSignals || 2)) {
+      if (this.cfg.enrollSignals > 0 && this.cfg.trendEntryLive > 0 && ordinal <= (this.cfg.trendEntryMaxSignals || 2)) {
         trendEntry = true;
         sig.trendEntry = ordinal;
         this._baseStats().trendBypass++;
@@ -3811,7 +3842,7 @@ export class Bot {
         console.log(`[trendentry] ${v.symbol}: trend signal #${ordinal} — direct entry instead of enrollment`);
       }
     }
-    if (this.cfg.baseMode && !BASE_ENTRY_SETUPS.has(sig.setup) && !laneEntry && !trendEntry) {
+    if (this.cfg.baseMode && this.cfg.enrollSignals > 0 && !BASE_ENTRY_SETUPS.has(sig.setup) && !laneEntry && !trendEntry) {
       const bm = this._baseStats();
       bm.enrolled++;
       bm.bySetup[sig.setup] = (bm.bySetup[sig.setup] || 0) + 1;

@@ -37,7 +37,7 @@ function seedHistory(bot, mint, price = 1) {
 // Full-pipeline rig (the fastbond shape): real onSignal, healthy rug,
 // working quotes. baseMode rides loadConfig's default unless overridden.
 function pipelineRig({ cfgOver = {}, env = {} } = {}) {
-  const cfg = testCfg({ tradeSol: 0.02, ...cfgOver }, env);
+  const cfg = testCfg({ tradeSol: 0.02, enrollSignals: 1, ...cfgOver }, env); // this suite tests the enrollment world; ENROLL_SIGNALS defaults 0 since the owner's 2026-10-18 removal order (tests/trendentry.test.mjs pins the direct world)
   const clock = { t: T0 };
   const q = { valueLam: 19_000_000 };
   const quote = async (input, _o, amount) => (input === SOL_MINT
@@ -149,7 +149,7 @@ test('base mode: base setups pass the demotion seam — range, staircase and bot
 const RMARK = { type: 'mark', ts: T0, mint: 'MINTR', symbol: 'RNG', markId: 'rw-MINTR-1-m1', episodeId: 'rw-MINTR-1', bandPct: 4, tightness: 0.114, durationMin: 20, rangeHi: 520_000, rangeLo: 500_000, rangeMid: 510_000, markMc: 505_000, markPrice: 1 };
 
 function rangeRig(over = {}, env = {}) {
-  const cfg = testCfg({ ...over }, env);
+  const cfg = testCfg({ enrollSignals: 1, ...over }, env); // the range family is judged in the enrollment world; ENROLL_SIGNALS defaults 0 since the owner's 2026-10-18 removal order
   const clock = { t: T0 };
   const views = new Map();
   const exec = new Executor(cfg, { quote: async () => ({ outAmount: '1000000000', priceImpactPct: '0.01' }) });
@@ -177,16 +177,15 @@ function openRangeEpisode(bot, rec) {
   });
 }
 
-test('range refinement: a mark in the TOP THIRD does not buy — skip journaled, dip watch opens', async () => {
+test('range refinement: a mark in the TOP THIRD does not buy — verdict tallied (no signal card since the 2026-10-18 declutter order), dip watch opens', async () => {
   const { bot, clock, views, calls } = rangeRig();
   enroll(bot);
   views.set('MINTR', view({ address: 'MINTR', symbol: 'RNG', mc: 517_000 })); // (517-500)/20 = 0.85 — top third
   bot._evalRange(RMARK);
   await flush();
   assert.equal(calls.length, 0);
-  const rec = bot.journal.signals.at(-1);
-  assert.equal(rec.decision, 'skipped');
-  assert.ok(rec.reasons.some(r => r === 'range top-third — watching for the dip'), JSON.stringify(rec.reasons));
+  assert.equal(bot.journal.signals.filter(s => s.setup === 'range').length, 0, 'pre-pipeline range verdicts no longer journal');
+  assert.equal(bot.stats.baseMode.rangeSkips.byKind.topThird, 1);
   assert.ok(bot.rangeDipWatch.has('rw-MINTR-1'), 'dip watch opened for the episode');
   assert.equal(bot.stats.baseMode.dipWatches, 1);
   assert.equal(clock.t, T0);
@@ -518,18 +517,25 @@ test('pulse floor: a staircase floor set above zero binds staircase evals at THA
   assert.ok(rec.reasons.some(r => r === 'base pulse: volM5 $300 under the $1,000 floor — dead base'), JSON.stringify(rec.reasons));
 });
 
-test('enrollment gate: an UNENROLLED mint’s range mark journals-skips and never buys — base alone is not a nomination', async () => {
+test('enrollment gate: an UNENROLLED mint’s range mark tallies silently and never buys — base alone is not a nomination', async () => {
   const { bot, views, calls } = rangeRig();
   views.set('MINTR', view({ address: 'MINTR', symbol: 'RNG', mc: 505_000 })); // healthy tape, lower two-thirds — everything but the nomination
   bot._evalRange(RMARK);
   await flush();
   assert.equal(calls.length, 0);
-  const rec = bot.journal.signals.at(-1);
-  assert.equal(rec.decision, 'skipped');
-  assert.equal(rec.setup, 'range');
-  assert.ok(rec.reasons.some(r => r === 'range: coin never enrolled by a signal — base alone is not a nomination'), JSON.stringify(rec.reasons));
+  assert.equal(bot.journal.signals.filter(s => s.setup === 'range').length, 0, 'the nomination verdict no longer journals a signal card');
   assert.equal(bot.stats.baseMode.rangeUnenrolled, 1);
+  assert.equal(bot.stats.baseMode.rangeSkips.byKind.unenrolled, 1);
   assert.equal(bot.rangeDipWatch.size, 0, 'an unenrolled mark opens no dip watch either');
+});
+
+test('enrollment gate is OFF with the enrollment removal: an unenrolled mint’s range mark routes on its own', async () => {
+  const { bot, views, calls } = rangeRig({ enrollSignals: 0 });
+  views.set('MINTR', view({ address: 'MINTR', symbol: 'RNG', mc: 505_000 }));
+  bot._evalRange(RMARK);
+  await flush();
+  assert.equal(calls.length, 1, 'no nomination needed once enrollment is removed');
+  assert.equal(bot.stats.baseMode.rangeUnenrolled, 0);
 });
 
 test('enrollment gate: TTL expiry re-gates — an enrollment older than ENROLL_TTL_H no longer nominates', async () => {
@@ -551,7 +557,7 @@ test('enrollment gate: boot restore re-arms a journal-enrolled mint — a restar
   const dir = tmp();
   const rec = { id: 'sig-1', ts: T0, mint: 'MINTR', symbol: 'RNG', setup: 'pop', decision: 'skipped', reasons: ['base mode: enrolled for base watch — entries only from a formed base'], price: 1, mc: 505_000, fields: { enrolledBy: 'pop' } };
   fs.writeFileSync(path.join(dir, 'signals.jsonl'), JSON.stringify(rec) + '\n');
-  const cfg = testCfg({ dataDir: dir });
+  const cfg = testCfg({ dataDir: dir, enrollSignals: 1 });
   const clock = { t: T0 };
   const views = new Map();
   const exec = new Executor(cfg, { quote: async () => ({ outAmount: '1000000000', priceImpactPct: '0.01' }) });
