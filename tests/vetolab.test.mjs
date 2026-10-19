@@ -1,0 +1,235 @@
+// Killswitch Veto Shadow (owner order 2026-10-19): the 8 held Part-1 entry
+// vetoes evaluated in shadow at gate time — would-veto records in
+// veto_shadow.jsonl, forward outcomes joined at read time, /vetoshadow
+// serving the live-vs-shadow card. Record-only: these tests pin the rule
+// math (exactly as written in the brief/backtest, boundaries included), the
+// linkedDrain stamp extraction (incl. the shadow-gates fallback — the
+// follow-up report's ZeroFee lesson), the close-basis R1 leg, and the hard
+// boundary that a shadow failure can never disturb the signal path.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { Journal } from '../src/journal.js';
+import { Bot } from '../src/bot.js';
+import { Executor } from '../src/exec.js';
+import { startServer } from '../src/server.js';
+import { evaluateVetoes, parseLinkedDrainReason, linkedDrainFromChecks, buildVetoCard, VETO_RULES } from '../src/vetoLab.js';
+import { tmp, testCfg, view } from './helpers.mjs';
+
+const T0 = 1_000_000_000_000;
+const MIN = 60000;
+const readVeto = (dir) => { try { return fs.readFileSync(path.join(dir, 'veto_shadow.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)); } catch { return []; } };
+const base = { setup: 'pop', chgM5: null, chgH1: null, chgH24: null, ageMin: null, linkedDrain: null, topGuardDistPct: null, topGuardHighAgeSec: null, fakeAliveShare: null };
+
+test('veto: each rule fires exactly at its written line, not before', () => {
+  // R1 fakeAlive.share > 0.30 (strict)
+  assert.deepEqual(evaluateVetoes({ ...base, fakeAliveShare: 0.30 }), []);
+  assert.deepEqual(evaluateVetoes({ ...base, fakeAliveShare: 0.31 }), ['R1']);
+  // R2 linkedDrain > 0.10 (strict)
+  assert.deepEqual(evaluateVetoes({ ...base, linkedDrain: 0.10 }), []);
+  assert.deepEqual(evaluateVetoes({ ...base, linkedDrain: 0.11 }), ['R2']);
+  // R3 ageMin < 5 AND chgM5 <= -30 (age strict, chg inclusive)
+  assert.deepEqual(evaluateVetoes({ ...base, ageMin: 4, chgM5: -30 }), ['R3']);
+  assert.deepEqual(evaluateVetoes({ ...base, ageMin: 5, chgM5: -30 }), []);
+  assert.deepEqual(evaluateVetoes({ ...base, ageMin: 4, chgM5: -29.9 }), []);
+  // R4 chgM5 > 20 (strict)
+  assert.deepEqual(evaluateVetoes({ ...base, chgM5: 20 }), []);
+  assert.deepEqual(evaluateVetoes({ ...base, chgM5: 20.1 }), ['R4']);
+  // R5 chgH1 > 150 (strict)
+  assert.deepEqual(evaluateVetoes({ ...base, chgH1: 150 }), []);
+  assert.deepEqual(evaluateVetoes({ ...base, chgH1: 151 }), ['R5']);
+  // R6 chgH24 > 500 AND chgH1 < -25 (both strict)
+  assert.deepEqual(evaluateVetoes({ ...base, chgH24: 500, chgH1: -26 }), []);
+  assert.deepEqual(evaluateVetoes({ ...base, chgH24: 501, chgH1: -25 }), []);
+  assert.deepEqual(evaluateVetoes({ ...base, chgH24: 501, chgH1: -26 }), ['R6']);
+  // R7 topGuard distPct < 5 AND highAgeSec < 300 (both strict)
+  assert.deepEqual(evaluateVetoes({ ...base, topGuardDistPct: 5, topGuardHighAgeSec: 100 }), []);
+  assert.deepEqual(evaluateVetoes({ ...base, topGuardDistPct: 4.9, topGuardHighAgeSec: 300 }), []);
+  assert.deepEqual(evaluateVetoes({ ...base, topGuardDistPct: 4.9, topGuardHighAgeSec: 299 }), ['R7']);
+  // R8 chgM5 < -15, confluence/bottom lanes only
+  assert.deepEqual(evaluateVetoes({ ...base, chgM5: -20 }), []); // pop lane: no fire
+  assert.deepEqual(evaluateVetoes({ ...base, setup: 'bottom', chgM5: -15 }), []);
+  assert.deepEqual(evaluateVetoes({ ...base, setup: 'bottom', chgM5: -15.1 }), ['R8']);
+  assert.deepEqual(evaluateVetoes({ ...base, setup: 'confluence', chgM5: -45 }), ['R8']);
+});
+
+test('veto: Shrub-shaped input fires the same four rules the backtest found', () => {
+  const fired = evaluateVetoes({ setup: 'confluence', chgM5: -45.59, chgH1: null, chgH24: null, ageMin: 1, linkedDrain: 0.118, topGuardDistPct: null, topGuardHighAgeSec: null, fakeAliveShare: 0.529 });
+  assert.deepEqual(fired, ['R1', 'R2', 'R3', 'R8']);
+});
+
+test('veto: unstamped features never fire, garbage never throws', () => {
+  assert.deepEqual(evaluateVetoes(base), []);
+  assert.deepEqual(evaluateVetoes(null), []);
+  assert.deepEqual(evaluateVetoes(undefined), []);
+  assert.deepEqual(evaluateVetoes('junk'), []);
+  assert.deepEqual(evaluateVetoes({ chgM5: NaN, chgH1: Infinity, linkedDrain: {}, ageMin: [] }), []);
+  assert.equal(VETO_RULES.length, 8);
+});
+
+test('veto: linkedDrain extraction — raw stamp, reason parse, shadow-gates fallback', () => {
+  assert.equal(parseLinkedDrainReason('linked stack could pull 36% of pool SOL'), 0.36);
+  assert.equal(parseLinkedDrainReason('linked wallets could dump in one go and pull 42% of pool SOL'), 0.42);
+  assert.equal(parseLinkedDrainReason('no linked stack'), 0);
+  assert.equal(parseLinkedDrainReason('pool data missing'), null);
+  assert.equal(parseLinkedDrainReason(null), null);
+  // raw numeric drain wins over the (rounded) reason text
+  assert.equal(linkedDrainFromChecks({ linkedDump: { pass: false, drain: 0.364, reason: 'linked stack could pull 36% of pool SOL' } }, null), 0.364);
+  // summary-only checks (what skip() actually receives) parse from reason
+  assert.equal(linkedDrainFromChecks({ linkedDump: { pass: true, reason: 'linked stack could pull 36% of pool SOL' } }, null), 0.36);
+  // ZeroFee shape: the stamp lives in the shadow gates, not the live checks
+  assert.equal(linkedDrainFromChecks({}, { linkedDump: { pass: true, reason: 'linked stack could pull 36% of pool SOL' } }), 0.36);
+  assert.equal(linkedDrainFromChecks(null, { linkedDump: { pass: false, drain: 0.421, reason: 'x' } }), 0.421);
+  // measured zero beats nothing-at-all; unmeasured stays null
+  assert.equal(linkedDrainFromChecks({ linkedDump: { pass: true, reason: 'no linked stack' } }, null), 0);
+  assert.equal(linkedDrainFromChecks({ linkedDump: { pass: true, unknown: true, reason: 'pool data missing' } }, null), null);
+  assert.equal(linkedDrainFromChecks(null, null), null);
+  assert.equal(linkedDrainFromChecks({ linkedDump: null }, { other: 1 }), null);
+});
+
+test('veto: card folds records per rule with the live (taken) column split out', () => {
+  const outcomes = {
+    s1: { done: true, r15: 0.1, r60: -0.5, maxRet: 0.2, partial: false },
+    s3: { done: true, r15: -0.2, r60: -0.6, maxRet: 0.05, partial: false },
+  };
+  const recs = [
+    { kind: 'veto', ts: 1, mint: 'A', symbol: 'A', setup: 'pop', decision: 'taken', basis: 'signal', rules: ['R2', 'R4'], signalId: 's1' },
+    { kind: 'veto', ts: 2, mint: 'B', symbol: 'B', setup: 'pop', decision: 'skipped', basis: 'signal', rules: ['R2'], signalId: 's2' },
+    { kind: 'veto', ts: 3, mint: 'C', symbol: 'C', setup: 'bottom', decision: 'taken', basis: 'close', rules: ['R1'], signalId: 's3', pnlSol: -0.05 },
+    { kind: 'note', ts: 4, rules: ['R2'] }, // foreign record kinds are ignored
+  ];
+  const card = buildVetoCard(recs, (id) => outcomes[id] || null);
+  assert.equal(card.perRule.R2.wouldVeto, 2);
+  assert.equal(card.perRule.R2.taken, 1);
+  assert.equal(card.perRule.R2.skipped, 1);
+  assert.equal(card.perRule.R2.finalized, 1);
+  assert.equal(card.perRule.R2.medianR60, -0.5);
+  assert.equal(card.perRule.R4.wouldVeto, 1);
+  assert.equal(card.perRule.R4.medianR15, 0.1);
+  assert.equal(card.perRule.R1.wouldVeto, 1);
+  assert.equal(card.perRule.R1.realizedPnlSol, -0.05);
+  assert.equal(card.perRule.R1.realizedN, 1);
+  assert.equal(card.perRule.R8.wouldVeto, 0);
+  assert.equal(card.totals.records, 3);
+  assert.equal(card.totals.wouldVetoSignals, 2);
+  assert.equal(card.totals.takenLive, 1);
+  assert.equal(card.totals.r1TakenCloses, 1);
+  assert.equal(card.recent[0].symbol, 'C'); // newest first
+  assert.equal(card.recent[0].out.r60, -0.6);
+});
+
+test('veto: journal joins the would-veto to the signal tracked outcome at read time', () => {
+  const dir = tmp();
+  let t = T0;
+  const j = new Journal(dir, { now: () => t });
+  const sid = j.signal({ mint: 'M1', symbol: 'HOT', setup: 'pop', decision: 'skipped', reasons: ['gates'], price: 100, mc: 50000 });
+  j.vetoShadow({ kind: 'veto', id: sid, ts: t, basis: 'signal', mint: 'M1', symbol: 'HOT', setup: 'pop', decision: 'skipped', reason: 'gates', rules: ['R4'], features: { chgM5: 33 }, signalId: sid, mc: 50000, price: 100 });
+  // pending: no finalized aggregates yet
+  let card = j.vetoCard();
+  assert.equal(card.perRule.R4.wouldVeto, 1);
+  assert.equal(card.perRule.R4.finalized, 0);
+  assert.equal(card.perRule.R4.medianR60, null);
+  // drive the outcome machinery: +50% by 15m, -20% by 60m
+  t = T0 + 16 * MIN; j.observe({ address: 'M1', price: 150 });
+  t = T0 + 61 * MIN; j.observe({ address: 'M1', price: 80 });
+  card = j.vetoCard();
+  assert.equal(card.perRule.R4.finalized, 1);
+  assert.equal(card.perRule.R4.medianR15, 0.5);
+  assert.equal(card.perRule.R4.medianR60, -0.2);
+  assert.equal(card.perRule.R4.sharePosR60, 0);
+  assert.equal(readVeto(dir).length, 1);
+});
+
+function rigBot(dir, nowFn) {
+  const cfg = testCfg({ dataDir: dir });
+  const exec = new Executor(cfg, { quote: async () => ({ outAmount: '1000000000', priceImpactPct: '0.01' }) });
+  return new Bot(cfg, {
+    now: nowFn || (() => T0), exec,
+    discover: async () => Object.assign(new Map(), { counts: {} }),
+    fetchViews: async () => new Map(),
+    fetchSolUsd: async () => 150, fetchRug: async () => null, searchByName: async () => [],
+  });
+}
+
+test('veto: bot.skip journals a would-veto beside the skipped signal — and only on a fire', () => {
+  const dir = tmp();
+  const bot = rigBot(dir);
+  const hot = view({ address: 'HOTMINT', symbol: 'HOT', chgM5: 33.04, chgH1: 183, createdAt: T0 - 3600e3 });
+  bot.skip(hot, { setup: 'pop', metrics: {} }, ['some gate'], [], { linkedDump: { pass: true, reason: 'linked stack could pull 36% of pool SOL' } }, true);
+  const recs = readVeto(dir);
+  assert.equal(recs.length, 1);
+  assert.deepEqual(recs[0].rules, ['R2', 'R4', 'R5']);
+  assert.equal(recs[0].decision, 'skipped');
+  assert.equal(recs[0].features.linkedDrain, 0.36);
+  assert.equal(recs[0].features.chgM5, 33.04);
+  assert.ok(recs[0].signalId);
+  assert.equal(bot.journal.signals.length, 1);
+  assert.equal(bot.journal.signals[0].decision, 'skipped');
+  // a calm signal writes no veto record
+  const calm = view({ address: 'CALMMINT', symbol: 'CALM', chgM5: 2, chgH1: 5, chgH24: 10, createdAt: T0 - 3600e3 });
+  bot.skip(calm, { setup: 'pop', metrics: {} }, ['some gate'], [], { linkedDump: { pass: true, reason: 'no linked stack' } }, true);
+  assert.equal(readVeto(dir).length, 1);
+  assert.equal(bot.journal.signals.length, 2);
+});
+
+test('veto: a throwing shadow write can never disturb the signal path', () => {
+  const dir = tmp();
+  const bot = rigBot(dir);
+  bot.journal.vetoShadow = () => { throw new Error('disk on fire'); };
+  const hot = view({ address: 'HOTMINT', symbol: 'HOT', chgM5: 86.17, createdAt: T0 - 3600e3 });
+  assert.doesNotThrow(() => bot.skip(hot, { setup: 'bottom', metrics: {} }, ['x'], [], {}, null));
+  assert.equal(bot.journal.signals.length, 1); // the signal itself still journaled
+  // hostile feature shapes also stay silent
+  const weird = view({ address: 'WEIRDMINT', symbol: 'WEIRD', chgM5: 'hot', chgH1: undefined, createdAt: 'garbage' });
+  assert.doesNotThrow(() => bot._noteVetoShadow({ v: weird, sig: { setup: 'pop' }, checks: { linkedDump: 42, topGuard: 'nope' }, decision: 'skipped', reasons: [], signalId: null }));
+});
+
+test('veto: R1 is judged at close on the final fake-alive stamp', () => {
+  const dir = tmp();
+  const bot = rigBot(dir);
+  const sid = bot.journal.signal({ mint: 'GRIND', symbol: 'GRIND', setup: 'confluence', decision: 'taken', reasons: [], price: 1, mc: 30000 });
+  const pos = { id: 'GRINDX-1', mint: 'GRIND', symbol: 'GRIND', setup: 'confluence', entryTs: T0 + 3000, entryMc: 30000, entryPrice: 1, entry: { chgM5: -45.59, ageMin: 1, linkedDrain: 0.118 } };
+  // share at the line and below: nothing
+  bot._noteVetoClose(pos, { fakeAlive: { samples: 9, fake: 2, share: 0.30 }, pnlSol: -0.01, reason: 'x' });
+  bot._noteVetoClose(pos, { fakeAlive: { samples: 9, fake: 1, share: 0.11 }, pnlSol: -0.01, reason: 'x' });
+  bot._noteVetoClose(pos, { fakeAlive: null, pnlSol: -0.01, reason: 'x' });
+  assert.equal(readVeto(dir).length, 0);
+  // the Shrub shape: share 0.529 over the hold -> close-basis would-veto
+  bot._noteVetoClose(pos, { fakeAlive: { samples: 9, fake: 5, share: 0.529 }, pnlSol: -0.0712, pnlPct: -71.2, reason: 'death detector' });
+  const recs = readVeto(dir);
+  assert.equal(recs.length, 1);
+  assert.equal(recs[0].basis, 'close');
+  assert.deepEqual(recs[0].rules, ['R1']);
+  assert.equal(recs[0].features.fakeAliveShare, 0.529);
+  assert.equal(recs[0].pnlSol, -0.0712);
+  assert.equal(recs[0].signalId, sid); // entry signal re-found for the outcome join
+  const card = bot.vetoCard();
+  assert.equal(card.perRule.R1.wouldVeto, 1);
+  assert.equal(card.perRule.R1.taken, 1);
+  assert.equal(card.perRule.R1.realizedPnlSol, -0.0712);
+  assert.equal(card.totals.r1TakenCloses, 1);
+});
+
+test('veto: HTTP surface — /vetoshadow serves the card, empty and populated', async () => {
+  const dir = tmp();
+  let t = T0;
+  const bot = rigBot(dir, () => t);
+  const srv = startServer(bot, 0);
+  const baseUrl = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const empty = await (await fetch(baseUrl + '/vetoshadow')).json();
+    assert.equal(empty.enabled, true);
+    assert.equal(empty.shadowOnly, true);
+    assert.equal(empty.perRule.R2.wouldVeto, 0);
+    assert.equal(empty.totals.records, 0);
+    const hot = view({ address: 'HOTMINT', symbol: 'HOT', chgM5: 33.04, createdAt: T0 - 3600e3 });
+    bot.skip(hot, { setup: 'pop', metrics: {} }, ['g'], [], { linkedDump: { pass: true, reason: 'no linked stack' } }, true);
+    t = T0 + 61000; // past the card's 60s file-read cache
+    const card = await (await fetch(baseUrl + '/vetoshadow')).json();
+    assert.equal(card.perRule.R4.wouldVeto, 1);
+    assert.equal(card.totals.wouldVetoSignals, 1);
+    assert.equal(card.totals.takenLive, 0);
+    assert.equal(card.totals.skippedSignals, 1);
+  } finally { srv.close(); }
+});

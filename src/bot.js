@@ -42,6 +42,7 @@ import { sampleFakeAlive, fakeAliveStamp, fakeAliveWindow } from './fakeAlive.js
 import { newCensus, censusFold, censusWindow, censusStamp } from './census.js';
 import { evaluatePreEntry, preEntryReason } from './preEntry.js';
 import { evaluateGrind, grindReason, grindKillTally } from './grindJudge.js';
+import { evaluateVetoes, linkedDrainFromChecks } from './vetoLab.js';
 
 // Scan Ledger: a watch session finalizes at this age even if the coin is
 // still being viewed (a re-view afterward starts a fresh session).
@@ -465,6 +466,10 @@ export class Bot {
     // the caller didn't (no caller ever does).
     if (full.fakeAlive === undefined) full.fakeAlive = fakeAliveStamp(pos);
     if (full.census === undefined) full.census = censusStamp(pos, this.now(), this.cfg.censusWindowMin * 60000);
+    // KILLSWITCH VETO SHADOW, R1 leg (record-only, owner order 2026-10-19):
+    // the fake-alive share exists only now, at close — judge the held R1
+    // veto on the final stamp and journal the would-veto (see vetoLab.js).
+    this._noteVetoClose(pos, full);
     if (typeof full.reason === 'string' && full.reason.startsWith('grind judge')) {
       this.grindState.closes++;
       this.saveGrindState();
@@ -1226,6 +1231,13 @@ export class Bot {
     try { return this.journal.deadEntryCard(); } catch { return { enabled: false }; }
   }
 
+  /** Read-only /vetoshadow payload — the Killswitch Veto Shadow scorecard
+   *  over veto_shadow.jsonl (see vetoLab.js; ~60s cached in the journal).
+   *  Record-only: no rule in it blocks or alters any entry. */
+  vetoCard() {
+    try { return this.journal.vetoCard(); } catch { return { enabled: false }; }
+  }
+
   /** Flow-Exit Watcher feed (record-only): the position's own mark state in
    *  the same measure the exit stack judges — the realizable move of the
    *  remaining position vs its entry round-trip, off the last live sell-quote
@@ -1948,7 +1960,84 @@ export class Bot {
   }
 
   skip(v, sig, reasons, warnings = [], gates = null, gatePass = null, shadowGates = null, shadowGatePass = null) {
-    this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decision: 'skipped', reasons, price: v.price, mc: v.mc, metrics: sig.metrics, warnings, label: sig.label || null, gates, gatePass, fields: this._fieldsFor(v, sig), shadowGates, shadowGatePass, liqRechecks: sig.liqRechecks ?? null });
+    const sigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decision: 'skipped', reasons, price: v.price, mc: v.mc, metrics: sig.metrics, warnings, label: sig.label || null, gates, gatePass, fields: this._fieldsFor(v, sig), shadowGates, shadowGatePass, liqRechecks: sig.liqRechecks ?? null });
+    this._noteVetoShadow({ v, sig, checks: gates, shadowGates, decision: 'skipped', reasons, signalId: sigId });
+  }
+
+  /** Killswitch veto shadow (record-only, owner order 2026-10-19): evaluate
+   *  the 8 held Part-1 veto rules against the snapshot/stamps THIS evaluation
+   *  produced and journal any firing to veto_shadow.jsonl — the result is
+   *  NEVER read back and no decision branches on it. Called from the three
+   *  onSignal exits (skip / shadow / taken) with whatever checks that path
+   *  produced. Fail-silent by construction: the body is fully guarded and
+   *  evaluateVetoes cannot throw, so the shadow can never disturb the
+   *  pipeline it observes. Features mirror learn.snapshotFeatures exactly
+   *  (the backtest's basis); topGuard reads the pipeline's own stamp when
+   *  this evaluation produced one, else measures on the spot from the same
+   *  sampled history with the same function. R1 (fakeAlive) has no
+   *  entry-time value and is judged at close instead — see _noteVetoClose. */
+  _noteVetoShadow({ v, sig, checks = null, shadowGates = null, decision, reasons = [], signalId = null }) {
+    try {
+      if (!v || !v.address) return;
+      const n = this.now();
+      const f = {
+        setup: (sig && sig.setup) || null,
+        chgM5: Number.isFinite(v.chgM5) ? v.chgM5 : null,
+        chgH1: Number.isFinite(v.chgH1) ? v.chgH1 : null,
+        chgH24: Number.isFinite(v.chgH24) ? v.chgH24 : null,
+        ageMin: v.createdAt ? Math.round((n - v.createdAt) / 60000) : null,
+        linkedDrain: linkedDrainFromChecks(checks, shadowGates),
+        topGuardDistPct: null, topGuardHighAgeSec: null,
+        fakeAliveShare: null,
+      };
+      const tg = checks && checks.topGuard;
+      if (tg && Number.isFinite(tg.distPct) && Number.isFinite(tg.highAgeSec)) { f.topGuardDistPct = tg.distPct; f.topGuardHighAgeSec = tg.highAgeSec; }
+      else {
+        try {
+          const m = topGuardVerdict(this.history.get(v.address), n, { currentMc: v.mc, lookbackMin: this.cfg.topGuardLookbackMin, surgeWindowSec: this.cfg.topGuardSurgeWindowSec, maxDistPct: this.cfg.topGuardDistPct, minSurgePct: this.cfg.topGuardSurgePct, highMaxAgeSec: this.cfg.topGuardHighMaxAgeSec });
+          if (m && Number.isFinite(m.distPct) && Number.isFinite(m.highAgeSec)) { f.topGuardDistPct = m.distPct; f.topGuardHighAgeSec = m.highAgeSec; }
+        } catch { /* unmeasured stays null — untestable, never invented */ }
+      }
+      const rules = evaluateVetoes(f);
+      if (!rules.length) return;
+      this.journal.vetoShadow({
+        kind: 'veto', id: signalId || `vt-${n}-${String(v.address).slice(0, 6)}`, ts: n, basis: 'signal',
+        mint: v.address, symbol: v.symbol || null, setup: f.setup, decision: decision || null,
+        reason: reasons && reasons.length ? String(reasons[0]) : null,
+        rules, features: f, signalId: signalId || null,
+        mc: v.mc ?? null, price: v.price ?? null,
+      });
+    } catch { /* shadow only — never disturb the signal path */ }
+  }
+
+  /** Killswitch veto shadow, R1 leg (record-only): fakeAlive.share exists
+   *  only as a position-life measurement (src/fakeAlive.js), so the
+   *  fake-alive veto is judged HERE — at the close funnel, on the final
+   *  stamp — exactly the basis the backtest judged it on (closes). A taken
+   *  trade whose hold scored share > 0.30 journals a close-basis would-veto
+   *  record carrying the realized PnL; the entry signal is re-found by mint
+   *  + entry ts so the card can join its tracked outcome too. Never read
+   *  back; never alters the close it rides on. */
+  _noteVetoClose(pos, full) {
+    try {
+      const share = full && full.fakeAlive ? full.fakeAlive.share : null;
+      if (!Number.isFinite(share) || share <= 0.30) return;
+      const e = (pos && pos.entry) || {};
+      let signalId = null;
+      const sigs = (this.journal && this.journal.signals) || [];
+      for (let i = sigs.length - 1; i >= 0; i--) {
+        const s = sigs[i];
+        if (s.mint === pos.mint && s.decision === 'taken' && s.ts <= pos.entryTs && pos.entryTs - s.ts <= 15000) { signalId = s.id; break; }
+      }
+      this.journal.vetoShadow({
+        kind: 'veto', id: `vt-close-${pos.id}`, ts: this.now(), basis: 'close',
+        mint: pos.mint, symbol: pos.symbol || null, setup: pos.setup || null, decision: 'taken',
+        reason: full.reason || null, rules: ['R1'],
+        features: { setup: pos.setup || null, chgM5: e.chgM5 ?? null, chgH1: e.chgH1 ?? null, chgH24: e.chgH24 ?? null, ageMin: e.ageMin ?? null, linkedDrain: e.linkedDrain ?? null, topGuardDistPct: null, topGuardHighAgeSec: null, fakeAliveShare: share },
+        signalId, posId: pos.id, mc: pos.entryMc ?? null, price: pos.entryPrice ?? null,
+        pnlSol: full.pnlSol ?? null, pnlPct: full.pnlPct ?? null,
+      });
+    } catch { /* shadow only — never disturb the close path */ }
   }
 
   // Setups currently in shadow-only mode (user 2026-10-14, forward plan step 1b):
@@ -1968,6 +2057,7 @@ export class Bot {
     this.stats.shadowSignals = this.stats.shadowSignals || {};
     this.stats.shadowSignals[sig.setup] = (this.stats.shadowSignals[sig.setup] || 0) + 1;
     const sigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decision: 'shadow', reasons: [sig.shadowReason || `shadow: ${sig.setup} is shadow-only — logged + outcome-tracked, no buy`], price: v.price, mc: v.mc, metrics: sig.metrics, warnings: [], label: sig.label || null, gates, gatePass, fields: this._fieldsFor(v, sig), liqRechecks: sig.liqRechecks ?? null });
+    this._noteVetoShadow({ v, sig, checks: gates, decision: 'shadow', reasons: [sig.shadowReason || `shadow: ${sig.setup} is shadow-only — logged + outcome-tracked, no buy`], signalId: sigId });
     // Trade-grade shadow (record-only, user 2026-10-14): a shadow signal that
     // PASSED its gate evaluation opens a VIRTUAL position at the signal
     // price, managed by the real exit stack (src/shadowTrades.js) — the
@@ -3942,7 +4032,8 @@ export class Bot {
       });
     }
 
-this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decision: 'taken', reasons: [], price: v.price, mc: v.mc, metrics: { ...sig.metrics, roundTrip: +rt.ratio.toFixed(3), sizeSol: size }, warnings: g.warnings, label: sig.label || null, gates: checks, gatePass: g.pass, fields: this._fieldsFor(v, sig), liqRechecks: sig.liqRechecks ?? null });
+const takenSigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decision: 'taken', reasons: [], price: v.price, mc: v.mc, metrics: { ...sig.metrics, roundTrip: +rt.ratio.toFixed(3), sizeSol: size }, warnings: g.warnings, label: sig.label || null, gates: checks, gatePass: g.pass, fields: this._fieldsFor(v, sig), liqRechecks: sig.liqRechecks ?? null });
+    this._noteVetoShadow({ v, sig, checks, decision: 'taken', reasons: [], signalId: takenSigId });
     this.journal.trade({ type: 'open', id: pos.id, mint: pos.mint, symbol: pos.symbol, setup: pos.setup, entrySol: pos.entrySol, sig: fill.sig, simulated: fill.simulated, ts: n, stamp: pos.stamp, tokensRaw: fill.tokensRaw, entryFillSol: pos.entryFillSol, entryFillUsd: pos.entryFillSol != null && solUsd > 0 ? +(pos.entryFillSol * solUsd).toFixed(10) : null, ...(slot === 2 && !laneEntry && this.cfg.slot2Sol > 0 ? { slot: 2 } : {}), ...(laneEntry ? { flowConfirm: 1, flowConfirmOrdinal: laneOrdinal } : {}) });
 
     // Flow-Exit Watcher (record-only): a flow-triggered entry starts a watch

@@ -27,6 +27,7 @@ import path from 'node:path';
 import { mean, median, round, readTailLines } from './util.js';
 import { pickResignalMark, verdictOf, buildResignalCard } from './resignalLab.js';
 import { foldStampedPopSignals, buildDeadEntryCard } from './deadEntryLab.js';
+import { buildVetoCard } from './vetoLab.js';
 
 const CPS = [5, 15, 60];          // minutes
 const EXPIRE_MIN = 90;
@@ -58,7 +59,7 @@ export class Journal {
   constructor(dir, { now = Date.now } = {}) {
     this.now = now;
     this.dir = dir;
-    this.f = { sig: path.join(dir, 'signals.jsonl'), out: path.join(dir, 'outcomes.jsonl'), trades: path.join(dir, 'trades.jsonl'), fb: path.join(dir, 'feedback.jsonl'), ticks: path.join(dir, 'ticks.jsonl'), manual: path.join(dir, 'manual_exits.jsonl'), reports: path.join(dir, 'trade_reports.jsonl'), rshadow: path.join(dir, 'ratchet_shadow.jsonl'), pend: path.join(dir, 'outcome_pending.json'), scan: path.join(dir, 'scans.jsonl'), sses: path.join(dir, 'scan_sessions.jsonl'), cshadow: path.join(dir, 'callout_shadow.jsonl'), rsig: path.join(dir, 'resignal_shadow.jsonl'), fexit: path.join(dir, 'flow_exits.jsonl'), swatch: path.join(dir, 'structure_watch.jsonl'), ssell: path.join(dir, 'shadow_sell.jsonl'), stair: path.join(dir, 'staircase_signals.jsonl'), pticks: path.join(dir, 'position_ticks.jsonl'), bwatch: path.join(dir, 'bottom_marks.jsonl'), rwatch: path.join(dir, 'range_marks.jsonl'), ngcut: path.join(dir, 'nevergreen.jsonl'), fconfirm: path.join(dir, 'flow_confirm.jsonl'), grind: path.join(dir, 'grind_judge.jsonl') };
+    this.f = { sig: path.join(dir, 'signals.jsonl'), out: path.join(dir, 'outcomes.jsonl'), trades: path.join(dir, 'trades.jsonl'), fb: path.join(dir, 'feedback.jsonl'), ticks: path.join(dir, 'ticks.jsonl'), manual: path.join(dir, 'manual_exits.jsonl'), reports: path.join(dir, 'trade_reports.jsonl'), rshadow: path.join(dir, 'ratchet_shadow.jsonl'), pend: path.join(dir, 'outcome_pending.json'), scan: path.join(dir, 'scans.jsonl'), sses: path.join(dir, 'scan_sessions.jsonl'), cshadow: path.join(dir, 'callout_shadow.jsonl'), rsig: path.join(dir, 'resignal_shadow.jsonl'), fexit: path.join(dir, 'flow_exits.jsonl'), swatch: path.join(dir, 'structure_watch.jsonl'), ssell: path.join(dir, 'shadow_sell.jsonl'), stair: path.join(dir, 'staircase_signals.jsonl'), pticks: path.join(dir, 'position_ticks.jsonl'), bwatch: path.join(dir, 'bottom_marks.jsonl'), rwatch: path.join(dir, 'range_marks.jsonl'), ngcut: path.join(dir, 'nevergreen.jsonl'), fconfirm: path.join(dir, 'flow_confirm.jsonl'), grind: path.join(dir, 'grind_judge.jsonl'), vshadow: path.join(dir, 'veto_shadow.jsonl') };
     this._pendDirty = false;   // outcome-tracking progress changed since the last save
     this._pendSavedAt = 0;
     try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
@@ -82,6 +83,7 @@ export class Journal {
     for (const r of readTail(this.f.ngcut, KEEP)) this.neverGreenRecs.push(r);
     this.resignalFired = new Set();   // answered-resignal shadow: mark keys that already produced a record (rebuilt from resignal_shadow.jsonl in boot())
     this._rsigCache = null; this._rsigCacheTs = 0;
+    this._vetoCache = null; this._vetoCacheTs = 0;   // killswitch veto shadow: cached full-file read for the /vetoshadow card
     this.boot();
   }
 
@@ -194,6 +196,33 @@ export class Journal {
   resignal(rec) { if (rec.markKey) this.resignalFired.add(rec.markKey); this.append(this.f.rsig, rec); return rec; }
   /** Flow-exit watcher record (start / trim / exit / final) — append-only, observer only (see flowExits.js). Like the callout lab: NO in-memory tail; the watcher folds the full file itself. */
   flowExit(rec) { this.append(this.f.fexit, rec); return rec; }
+  /** Killswitch veto-shadow record (record-only, owner order 2026-10-19): one per signal (or taken close, for R1) that at least one of the 8 held veto rules would have blocked — append-only, observer only (see vetoLab.js). Like the callout lab: NO in-memory tail; the card folds the full file itself. */
+  vetoShadow(rec) { this.append(this.f.vshadow, rec); return rec; }
+
+  /** Full veto_shadow.jsonl with a ~60s cache (the resignalRecords trade:
+   *  the file only appends, so a fresh record can lag the card by up to the
+   *  cache window; windows outgrow an in-memory tail). */
+  vetoRecords() {
+    const n = this.now();
+    if (this._vetoCache && n - this._vetoCacheTs < 60000) return this._vetoCache;
+    let recs = [];
+    try {
+      recs = fs.readFileSync(this.f.vshadow, 'utf8').split('\n').filter(Boolean)
+        .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    } catch { recs = []; }
+    this._vetoCache = recs; this._vetoCacheTs = n;
+    return recs;
+  }
+
+  /** Read-only /vetoshadow payload: would-veto records joined at read time
+   *  to each signal's tracked outcome (journal.byId, restored across boots
+   *  with the signals themselves), split per rule with the live column
+   *  (actually taken) beside the shadow column (all would-vetoes). */
+  vetoCard() {
+    const outcomeOf = (id) => { const s = id ? this.byId.get(id) : null; return s && s.out && s.out.done ? s.out : null; };
+    const records = this.vetoRecords();
+    return { enabled: true, shadowOnly: true, generatedTs: this.now(), journalRecords: records.length, ...buildVetoCard(records, outcomeOf) };
+  }
 
   /** FLOW CONFIRMATION LANE events (2026-10-17): lifecycle records for
    *  the lane — above all the pre-registered kill rule's self-disablement

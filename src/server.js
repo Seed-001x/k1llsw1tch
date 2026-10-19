@@ -264,6 +264,17 @@ export function startServer(bot, port) {
       if (!bot.resignalCard) return json(res, 200, { enabled: false });
       return json(res, 200, bot.resignalCard());
     }
+    if (req.method === 'GET' && u.pathname === '/vetoshadow') {
+      // Killswitch Veto Shadow (record-only, owner order 2026-10-19): the 8
+      // held Part-1 entry vetoes evaluated in shadow at gate time — per-rule
+      // would-veto counts with the live column (signals actually taken that
+      // a rule would have vetoed) beside the shadow column (all
+      // would-vetoes), forward r15/r60 joined at read time from the
+      // signals' own outcome tracking. No rule blocks anything; promotion
+      // is the owner's call, one rule at a time.
+      if (!bot.vetoCard) return json(res, 200, { enabled: false });
+      return json(res, 200, bot.vetoCard());
+    }
     if (req.method === 'GET' && u.pathname === '/deadentry') {
       // Dead-Entry Veto study (record-only): every pop signal's stamp —
       // its own 5m volume + buy velocity and the would-block verdicts at
