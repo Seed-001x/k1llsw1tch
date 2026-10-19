@@ -104,8 +104,12 @@ test('base mode: a pop candidate is ENROLLED, never bought — record, tallies, 
 });
 
 test('base mode: flow, confluence, trend and devlaunch candidates all demote the same way', async () => {
+  // The trend leg runs with the TREND ENTRY LANE off (owner order
+  // 2026-10-18 21:49 EDT gave early trend signals a direct-entry lane —
+  // tests/trendentry.test.mjs pins it): with the lane off, trend demotes
+  // exactly like the others, which is what this uniformity check is for.
   for (const setup of ['flow', 'confluence', 'trend', 'devlaunch']) {
-    const rig = pipelineRig();
+    const rig = pipelineRig(setup === 'trend' ? { cfgOver: { trendEntryLive: 0 } } : {});
     const rec = await fire(rig, { mint: 'MINT' + setup.toUpperCase(), setup });
     assert.equal(rec.decision, 'skipped', `${setup}: ${JSON.stringify(rec.reasons)}`);
     assert.ok(rec.reasons.some(r => r.startsWith('base mode: enrolled')), `${setup} must carry the base-mode reason`);

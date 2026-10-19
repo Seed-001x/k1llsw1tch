@@ -148,6 +148,8 @@ export function loadConfig(env = process.env) {
     // stop at the base's own low. 0 = tonight's direct-buy behavior,
     // byte-identical.
     baseMode: num(env, 'BASE_MODE', 1),                      // 1 = base strategy on (0 = direct entries as before)
+    trendEntryLive: num(env, 'TREND_ENTRY_LIVE', 1),         // TREND ENTRY LANE (owner order 2026-10-18 21:49 EDT): 1 = a trend signal that passed the whole stack may enter directly while it is among the mint's first TREND_ENTRY_MAX_SIGNALS trend signals, instead of only enrolling for base watch; 0 = enrollment only (the pre-lane behavior). Distinct from TREND_LIVE (the shadow-routing flip).
+    trendEntryMaxSignals: num(env, 'TREND_ENTRY_MAX_SIGNALS', 2), // the owner's cap: "only the 1 or 2nd time it signals not the 20th"
     // Base-strategy entry gates (owner decision 2026-10-16 23:16 EDT,
     // off tonight's range burst — the range path bought DEAD coins:
     // entry volM5 stamps of $0 / $17 / $137 / $186 / $524 / $958 against
@@ -981,6 +983,8 @@ export function validateConfig(cfg) {
   if (cfg.rangeLive < 0 || cfg.rangeLive > 1) errs.push('RANGE_LIVE must be 0 or 1');
   if (cfg.bottomLive < 0 || cfg.bottomLive > 1) errs.push('BOTTOM_LIVE must be 0 or 1');
   if (cfg.baseMode < 0 || cfg.baseMode > 1) errs.push('BASE_MODE must be 0 or 1');
+  if (cfg.trendEntryLive < 0 || cfg.trendEntryLive > 1) errs.push('TREND_ENTRY_LIVE must be 0 or 1');
+  if (cfg.trendEntryMaxSignals < 1 || cfg.trendEntryMaxSignals > 20) errs.push('TREND_ENTRY_MAX_SIGNALS must be between 1 and 20');
   if (!(cfg.flowConfirmWindowH > 0) || cfg.flowConfirmWindowH > 72) errs.push('FLOW_CONFIRM_WINDOW_H must be > 0 and <= 72');
   if (!(cfg.flowConfirmMinMc >= 0)) errs.push('FLOW_CONFIRM_MIN_MC must be >= 0');
   if (!(cfg.flowConfirmSol > 0) || cfg.flowConfirmSol > 1) errs.push('FLOW_CONFIRM_SOL must be > 0 and <= 1');

@@ -244,7 +244,7 @@ export class Bot {
     if (this.stats.deadflow) { this.stats.deadflow.waves = this.stats.deadflow.waves || 0; this.stats.deadflow.floor = this.stats.deadflow.floor || 0; }
     // BASE MODE (owner order 2026-10-16): the tally exists from boot so
     // /state shows the strategy's shape even before the first enrollment.
-    this.stats.baseMode = { enrolled: 0, bySetup: {}, dipWatches: 0, dipEntries: 0, structureStops: 0, pulseSkips: { total: 0, bySetup: {} }, rangeUnenrolled: 0, ...(this.stats.baseMode || {}) };
+    this.stats.baseMode = { enrolled: 0, bySetup: {}, dipWatches: 0, dipEntries: 0, structureStops: 0, pulseSkips: { total: 0, bySetup: {} }, rangeUnenrolled: 0, trendBypass: 0, ...(this.stats.baseMode || {}) };
     // Never-Green Cut shadow tally (record-only, owner 2026-10-17): exists
     // from boot so /state shows the shadow's shape at 0 before its first
     // fire; fires counted at the would-fire, paired/deltaSol at the close
@@ -1999,7 +1999,21 @@ export class Bot {
   // measured on its next signal. Never throws.
   _birthStats() { const s = this.stats.birthMemory || (this.stats.birthMemory = {}); s.blocked = s.blocked || 0; s.written = s.written || 0; s.known = s.known || 0; return s; }
 
-  _baseStats() { const s = this.stats.baseMode || (this.stats.baseMode = { enrolled: 0, bySetup: {}, dipWatches: 0, dipEntries: 0, structureStops: 0, pulseSkips: { total: 0, bySetup: {} }, rangeUnenrolled: 0 }); if (!s.bySetup) s.bySetup = {}; if (!s.pulseSkips) s.pulseSkips = { total: 0, bySetup: {} }; if (!s.pulseSkips.bySetup) s.pulseSkips.bySetup = {}; return s; }
+  _baseStats() { const s = this.stats.baseMode || (this.stats.baseMode = { enrolled: 0, bySetup: {}, dipWatches: 0, dipEntries: 0, structureStops: 0, pulseSkips: { total: 0, bySetup: {} }, rangeUnenrolled: 0, trendBypass: 0 }); if (!s.bySetup) s.bySetup = {}; if (!s.pulseSkips) s.pulseSkips = { total: 0, bySetup: {} }; if (!s.pulseSkips.bySetup) s.pulseSkips.bySetup = {}; if (s.trendBypass == null) s.trendBypass = 0; return s; }
+
+  /** TREND ENTRY LANE (owner order 2026-10-18 21:49 EDT): the 1-based
+   *  ordinal of the NEXT trend signal for this mint — the count of
+   *  live-judged trend records already in the journal for the mint,
+   *  plus one. The journal is boot-hydrated from its file tail, so the
+   *  count survives restarts across the journaled window; shadow
+   *  records never counted (a shadowed coin has not "signaled" the
+   *  live pipeline). */
+  _trendOrdinal(mint) {
+    const sigs = (this.journal && this.journal.signals) || [];
+    let n = 0;
+    for (const s of sigs) if (s && s.mint === mint && s.setup === 'trend' && s.decision !== 'shadow') n++;
+    return n + 1;
+  }
 
   // PULSE FLOOR (owner decision 2026-10-16 23:16 EDT): a base-shape
   // entry needs a LIVE TAPE at eval time — the fresh view's volM5 at or
@@ -2067,11 +2081,13 @@ export class Bot {
   // computed block back untouched — records byte-identical to before.
   _fieldsFor(v, sig) {
     const f = this._signalFields(v, sig && sig.metrics);
-    if (!sig || (!sig.enrolledBy && !sig.deferredDip && !sig.baseTp1)) return f;
+    if (!sig || (!sig.enrolledBy && !sig.deferredDip && !sig.baseTp1 && !sig.trendOrdinal)) return f;
     const out = { ...(f || {}) };
     if (sig.enrolledBy) out.enrolledBy = sig.enrolledBy;
     if (sig.deferredDip) out.deferredDip = true;
     if (sig.baseTp1) out.baseTp1 = true;
+    if (sig.trendOrdinal) out.trendOrdinal = sig.trendOrdinal;
+    if (sig.trendEntry) out.trendEntry = sig.trendEntry;
     return out;
   }
 
@@ -3770,7 +3786,32 @@ export class Bot {
     if (laneEntry && this.cfg.baseMode && !BASE_ENTRY_SETUPS.has(sig.setup)) {
       checks.flowConfirm = { lane: true, enrolledBypass: true, reason: 'flow confirmation lane: qualifying repeat fire — direct entry instead of base-watch enrollment' };
     }
-    if (this.cfg.baseMode && !BASE_ENTRY_SETUPS.has(sig.setup) && !laneEntry) {
+    // TREND ENTRY LANE (owner order 2026-10-18 21:49 EDT, out of the
+    // godspeed post-mortem: a clean trend signal at $62K could only
+    // enroll, and every base door said no later at worse prices —
+    // "allow trends to not just be an enrollment type of signal...
+    // only the 1 or 2nd time it signals not the 20th"): a trend signal
+    // that survived the whole stack above may enter DIRECTLY while it
+    // is among the mint's first TREND_ENTRY_MAX_SIGNALS trend signals
+    // (the ordinal is counted from the journal and stamped on the
+    // record either way, so the lane's cohort stays scoreable). Past
+    // the cap the signal enrolls exactly as before. Like the flow
+    // lane, the verdict is stamped so the journal shows WHY this fire
+    // was allowed to spend; unlike it, sizing and cooldowns are the
+    // standard ones — this is a normal door, not a side lane.
+    let trendEntry = false;
+    if (this.cfg.baseMode && sig.setup === 'trend' && !laneEntry) {
+      const ordinal = this._trendOrdinal(v.address);
+      sig.trendOrdinal = ordinal;
+      if (this.cfg.trendEntryLive > 0 && ordinal <= (this.cfg.trendEntryMaxSignals || 2)) {
+        trendEntry = true;
+        sig.trendEntry = ordinal;
+        this._baseStats().trendBypass++;
+        checks.trendEntry = { lane: true, enrolledBypass: true, ordinal, max: this.cfg.trendEntryMaxSignals, reason: `trend entry lane: trend signal #${ordinal} for this mint (cap ${this.cfg.trendEntryMaxSignals}) — direct entry instead of base-watch enrollment` };
+        console.log(`[trendentry] ${v.symbol}: trend signal #${ordinal} — direct entry instead of enrollment`);
+      }
+    }
+    if (this.cfg.baseMode && !BASE_ENTRY_SETUPS.has(sig.setup) && !laneEntry && !trendEntry) {
       const bm = this._baseStats();
       bm.enrolled++;
       bm.bySetup[sig.setup] = (bm.bySetup[sig.setup] || 0) + 1;
