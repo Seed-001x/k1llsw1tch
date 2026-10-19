@@ -182,15 +182,20 @@ test('D1 paired: a manual exit spawns a virtual exit that terminates with a woul
   const rec = await bot.recordManualExit(pos, 0.024, n, 'sold in own wallet');
   assert.equal(bot.paired.pending.size, 1, 'paired shadow exit registered');
   // the coin craters after the human sold: the virtual stack exits on its own rules
-  bot.latest.set('MINT1', view({ price: 0.5, buysM5: 0, sellsM5: 10 }));
+  bot.latest.set('MINT1', view({ price: 0.5, buysM5: 5, sellsM5: 10 }));
   clock.t = n + 60000;
   bot.paired.tick(m => bot.latest.get(m) || null, clock.t, bot.cfg, 150);
   // the virtual is 21 minutes old and −50% on the crater print, so the
-  // ENTRY CLIP (owner order 2026-10-18, exits.js 5a) terminates it on the
-  // FIRST tick — before the stall exit (successor to the instant
-  // momentum-failure undertaker, user order 2026-10-16 19:24 EDT) can even
-  // stamp its 60s-confirm pending; the pair still records the would-be exit
-  assert.equal(bot.paired.pending.size, 0, 'virtual position terminated on the first crater tick');
+  // ENTRY CLIP (owner order 2026-10-18, exits.js 5a) owns the exit — the
+  // tape still has buyers (5 buys vs 10 sells is not the stall exit's
+  // dead-flow conjunction), so no other downside rule can take it. Since
+  // the owner's 2026-10-18 20:28 amendment the clip needs its 60s
+  // confirm: the first crater tick only stamps the pending, and the pair
+  // still records the would-be exit once the breach has held a minute
+  assert.equal(bot.paired.pending.size, 1, 'first crater tick stamps the clip pending — no instant sale');
+  clock.t = n + 120000;
+  bot.paired.tick(m => bot.latest.get(m) || null, clock.t, bot.cfg, 150);
+  assert.equal(bot.paired.pending.size, 0, 'virtual position terminated once the breach held through the confirm');
   const done = bot.paired.done.find(d => d.id === rec.id);
   assert.ok(done, 'paired comparison record produced');
   assert.equal(done.status, 'exited');

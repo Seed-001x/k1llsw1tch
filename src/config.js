@@ -626,6 +626,7 @@ export function loadConfig(env = process.env) {
     entryClip: num(env, 'ENTRY_CLIP', 1),                 // kill switch: 0 = no entry clip
     entryClipSec: num(env, 'ENTRY_CLIP_SEC', 180),        // the "3m timer": the rule does not exist for a younger position
     entryClipPct: num(env, 'ENTRY_CLIP_PCT', 0.07),       // the "−7%": clip line on the round-trip move vs entry
+    entryClipConfirmSec: num(env, 'ENTRY_CLIP_CONFIRM_SEC', 60), // owner amendment 2026-10-18 20:28 EDT: the breach must HOLD this long before the clip sells (0 = instant, the original form)
     // DEATH DETECTOR (owner design 2026-10-17 ~18:37 EDT, "put it to a test
     // with a .02 buy with our last funds"; combination rule delegated to the
     // agent): NOT a stop-loss — no price floor, no arming on targets, PnL is
@@ -843,6 +844,7 @@ export function validateConfig(cfg) {
   if (cfg.entryClip < 0 || cfg.entryClip > 1) errs.push('ENTRY_CLIP must be 0 or 1');
   if (cfg.entryClipSec < 0 || cfg.entryClipSec > 3600) errs.push('ENTRY_CLIP_SEC must be between 0 and 3600');
   if (cfg.entryClipPct < 0 || cfg.entryClipPct > 0.9) errs.push('ENTRY_CLIP_PCT must be between 0 and 0.9');
+  if (cfg.entryClipConfirmSec < 0 || cfg.entryClipConfirmSec > 3600) errs.push('ENTRY_CLIP_CONFIRM_SEC must be between 0 and 3600');
   if (cfg.stopXcheckPct < 0.05 || cfg.stopXcheckPct > 0.9) errs.push('STOP_XCHECK_PCT must be between 0.05 and 0.9');
   if (cfg.extMaxFromBase < 0 || cfg.extMaxFromBase > 20) errs.push('EXT_MAX_FROM_BASE must be between 0 and 20 (0 = off)');
   if (cfg.paceRelax < 0 || cfg.paceRelax > 1) errs.push('PACE_RELAX must be 0 or 1');

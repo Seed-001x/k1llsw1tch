@@ -171,6 +171,7 @@ export class PairedShadowExits {
         if ('moveHist' in d) s.moveHist = d.moveHist;
         if ('exitPending' in d) s.exitPending = d.exitPending;
         if ('stallPending' in d) s.stallPending = d.stallPending;
+        if ('clipPending' in d) s.clipPending = d.clipPending;
         if ('bagDeadWaves' in d) s.bagDeadWaves = d.bagDeadWaves;
         if ('bagDeadHot' in d) s.bagDeadHot = d.bagDeadHot;
         if ('tp1Arm' in d) s.tp1Arm = d.tp1Arm;

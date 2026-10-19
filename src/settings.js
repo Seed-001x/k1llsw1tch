@@ -51,6 +51,7 @@ export const SETTINGS_SCHEMA = [
   { key: 'tp2Frac', label: 'TP2 bank fraction', group: 'Exits', type: 'num', min: 0, max: 1, hint: 'share of the ORIGINAL position; 0 = off' },
   { key: 'entryClipSec', label: 'Entry clip timer (sec)', group: 'Exits', type: 'int', min: 0, max: 3600 },
   { key: 'entryClipPct', label: 'Entry clip line (fraction)', group: 'Exits', type: 'num', min: 0, max: 0.9, hint: '0.07 = −7%' },
+  { key: 'entryClipConfirmSec', label: 'Entry clip confirm (sec)', group: 'Exits', type: 'int', min: 0, max: 3600, hint: 'breach must hold this long before the clip sells; 0 = instant' },
 ];
 
 const BY_KEY = new Map(SETTINGS_SCHEMA.map(s => [s.key, s]));

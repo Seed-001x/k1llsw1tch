@@ -226,15 +226,15 @@ test('server: /shadowtrades serves pending + done in the paging envelope; /state
   await bot.start();
   bot.shadowTrades.open({ id: 'x-open', mint: 'MINT8', symbol: 'OPEN', setup: 'trend', price: 1, mc: 10, ts: T0, sizeSol: 0.02 });
   bot.shadowTrades.open({ id: 'x-done', mint: 'MINT9', symbol: 'DONE', setup: 'liftoff', price: 1, mc: 10, ts: T0, sizeSol: 0.02 });
-  // MINT9 halves on the view into dead flow → at 11 minutes old and −50%,
-  // the ENTRY CLIP (owner order 2026-10-18, exits.js 5a) closes that virtual
-  // in full on the first tick — before the stall exit's pending can even
-  // mature (the dip stop that used to take this print is stripped, and the
-  // instant momentum-failure undertaker was replaced by the stall exit's
-  // 60s confirm, user order 2026-10-16 19:24 EDT; the shadow book runs the
-  // same stack as live, clip included)
-  bot.shadowTrades.tick(mint => (mint === 'MINT9' ? view({ price: 0.5, buysM5: 1, sellsM5: 10 }) : null), T0 + 660000, cfg, 150);
-  bot.shadowTrades.tick(mint => (mint === 'MINT9' ? view({ price: 0.5, buysM5: 1, sellsM5: 10 }) : null), T0 + 721000, cfg, 150);
+  // MINT9 halves on the view → at 11 minutes old and −50%, the ENTRY CLIP
+  // (owner order 2026-10-18, exits.js 5a) closes that virtual in full once
+  // the breach has held through its 60s confirm (owner amendment
+  // 2026-10-18 20:28 EDT): the first tick stamps the pending, the second
+  // (61s later, still −50%) executes it. The tape keeps live buyers (5 vs
+  // 10 sells is not dead flow), so the stall exit never competes for the
+  // print; the shadow book runs the same stack as live, clip included.
+  bot.shadowTrades.tick(mint => (mint === 'MINT9' ? view({ price: 0.5, buysM5: 5, sellsM5: 10 }) : null), T0 + 660000, cfg, 150);
+  bot.shadowTrades.tick(mint => (mint === 'MINT9' ? view({ price: 0.5, buysM5: 5, sellsM5: 10 }) : null), T0 + 721000, cfg, 150);
   const srv = startServer(bot, 0);
   const base = `http://127.0.0.1:${srv.address().port}`;
   const get = async (p) => { const r = await fetch(base + p); assert.equal(r.status, 200, p); return r.json(); };

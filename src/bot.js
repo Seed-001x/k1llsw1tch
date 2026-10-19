@@ -962,7 +962,7 @@ export class Bot {
       stamp: this.cfgStamp, gates: { adopted: true }, gatePass: null, decimals: close.decimals ?? null,
       entryFillSol: open.entryFillSol ?? close.entryFillSol ?? null, solUsdEntry: null, ticks: [],
       entryVolH1: snap ? snap.volH1 || 0 : 0,
-      entryRoundTrip: rtRatio, peakMove: Math.max(1, ratio0), stopArmedTs: null, floorChecks: 0, floorSince: null, probationSince: null, moveHist: [], exitPending: {}, stallPending: null, bagDeadWaves: 0, bagDeadHot: false, feesSol: this.cfg.txFeeSol || 0,
+      entryRoundTrip: rtRatio, peakMove: Math.max(1, ratio0), stopArmedTs: null, floorChecks: 0, floorSince: null, probationSince: null, moveHist: [], exitPending: {}, stallPending: null, clipPending: null, bagDeadWaves: 0, bagDeadHot: false, feesSol: this.cfg.txFeeSol || 0,
       bw: { tracked: null, supply: 0, creator: null, weights: linkedWeights(null), snaps: [], vals: [], lastTs: 0, trimmed: false },
       entry: snap, lastTickTs: 0, lastChainTs: 0, chainDropStrikes: 0,
       adopted: true, adoptedTs: now, adoptOf: close.id || null, lastValueSol: valueSol,
@@ -3843,7 +3843,7 @@ export class Bot {
       stamp: this.cfgStamp, gates: checks, gatePass: g.pass, decimals: dec,
       entryFillSol: tokensWhole > 0 ? fill.solSpent / tokensWhole : null, solUsdEntry: solUsd || null, ticks: [],
       entryVolH1: v.volH1 || 0,
-      entryRoundTrip: rt.ratio, peakMove: 1, stopArmedTs: null, floorChecks: 0, floorSince: null, probationSince: null, moveHist: [], exitPending: {}, stallPending: null, bagDeadWaves: 0, bagDeadHot: false, feesSol: this.cfg.txFeeSol || 0, // buy tx fee // entry stall: price is at entry (move 1.0) by definition; the 60s clock runs from entryTs
+      entryRoundTrip: rt.ratio, peakMove: 1, stopArmedTs: null, floorChecks: 0, floorSince: null, probationSince: null, moveHist: [], exitPending: {}, stallPending: null, clipPending: null, bagDeadWaves: 0, bagDeadHot: false, feesSol: this.cfg.txFeeSol || 0, // buy tx fee // entry stall: price is at entry (move 1.0) by definition; the 60s clock runs from entryTs
       bw: { tracked: null, supply: rug && rug.token ? Number(rug.token.supply) || 0 : 0, creator: rug && rug.creator ? String(rug.creator) : null, weights: linkedWeights(rug), snaps: [], vals: [], lastTs: 0, trimmed: false },
       entry: snapshotFeatures({ v, sig, rug, g, now: n }), lastTickTs: 0, lastChainTs: 0, chainDropStrikes: 0,
     };
@@ -4181,6 +4181,7 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
     if ('postTp1PeakMove' in decision) pos.postTp1PeakMove = decision.postTp1PeakMove;
     if ('deadflowArmed' in decision) pos.deadflowArmed = decision.deadflowArmed;
     if ('stallPending' in decision) pos.stallPending = decision.stallPending;
+    if ('clipPending' in decision) pos.clipPending = decision.clipPending;
     if ('bagDeadWaves' in decision) pos.bagDeadWaves = decision.bagDeadWaves;
     if ('bagDeadHot' in decision) pos.bagDeadHot = decision.bagDeadHot;
     if ('bagTrailSince' in decision) pos.bagTrailSince = decision.bagTrailSince;
@@ -4487,7 +4488,7 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
       tp1Done: !!pos.tp1Done, tp2Done: !!pos.tp2Done, tp1Arm: pos.tp1Arm || null,
       stallSince: pos.stallSince ?? null, stopArmedTs: pos.stopArmedTs ?? null,
       floorChecks: pos.floorChecks || 0, floorSince: pos.floorSince ?? null,
-      probationSince: pos.probationSince ?? null, moveHist: pos.moveHist || [], exitPending: {}, stallPending: pos.stallPending ?? null, bagDeadWaves: pos.bagDeadWaves || 0, bagDeadHot: !!pos.bagDeadHot,
+      probationSince: pos.probationSince ?? null, moveHist: pos.moveHist || [], exitPending: {}, stallPending: pos.stallPending ?? null, clipPending: pos.clipPending ?? null, bagDeadWaves: pos.bagDeadWaves || 0, bagDeadHot: !!pos.bagDeadHot,
       flowHist: (pos.flowHist || []).slice(-45),
       manualTs: n, manualPnlSol: manual.pnlSol, manualMarkSol: manual.valueSol ?? null,
       // D1 follow-up: when the manual side was priced from the real sell tx,
@@ -4539,7 +4540,7 @@ this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decis
       archive: this.archiveStats || null,
       watchlist: this.watch.size,
       pairedShadow: this.paired ? { pending: this.paired.pending.size, done: this.paired.done.length } : { pending: 0, done: 0 },
-      positions: this.positions.map(p => ({ id: p.id, symbol: p.symbol, mint: p.mint, setup: p.setup, entrySol: p.entrySol, remainingFrac: p.remainingFrac, peakRatio: +(p.peakRatio || 1).toFixed(2), heldMin: +((this.now() - p.entryTs) / 60000).toFixed(1), simulated: p.simulated, noTp: !!p.noTp, protected: p.protected || null, takenOver: p.takenOver || null, tp1AtPct: p.tp1AtPct ?? null, path: p.pathClass || null, stallPending: p.stallPending ?? null, bagDeadWaves: p.bagDeadWaves ?? null, ddVitals: p.ddVitals ?? null, fakeAlive: fakeAliveStamp(p), census: censusStamp(p, this.now(), this.cfg.censusWindowMin * 60000) })),
+      positions: this.positions.map(p => ({ id: p.id, symbol: p.symbol, mint: p.mint, setup: p.setup, entrySol: p.entrySol, remainingFrac: p.remainingFrac, peakRatio: +(p.peakRatio || 1).toFixed(2), heldMin: +((this.now() - p.entryTs) / 60000).toFixed(1), simulated: p.simulated, noTp: !!p.noTp, protected: p.protected || null, takenOver: p.takenOver || null, tp1AtPct: p.tp1AtPct ?? null, path: p.pathClass || null, stallPending: p.stallPending ?? null, clipPending: p.clipPending ?? null, bagDeadWaves: p.bagDeadWaves ?? null, ddVitals: p.ddVitals ?? null, fakeAlive: fakeAliveStamp(p), census: censusStamp(p, this.now(), this.cfg.censusWindowMin * 60000) })),
       // stats.shadowTrades is read from the tracker at read time so /state can
       // never show a stale report card between the maintained sync points
       // gtOutcomes is read from the gtFetch tallies at read time (same pattern

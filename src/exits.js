@@ -234,11 +234,23 @@ export function evaluateExit(pos, mark, cfg, now) {
   // opened before this build carries none and starts unpended.
   let stallPending = pos.stallPending ?? null;
   const stallEvents = [];
+  // Entry-clip confirm state (owner amendment 2026-10-18 20:28 EDT,
+  // section 5a): the pending stamp (ms) of the first check at/below the
+  // clip line inside the rule's confirm window — null = no pending.
+  // Persisted by the caller with the rest of the exit state, so a
+  // pending survives restarts; a position opened before this build
+  // carries none and starts unpended.
+  let clipPending = pos.clipPending ?? null;
   // Scope, enforced here so no section below has to re-check it: the rule
   // exists only while its switch is on and the position is pre-moonbag —
   // reaching TP2 (or flipping STALL_EXIT off) drops any carried pending,
   // so no stale stamp can execute in a stage the rule does not own.
   if (!(cfg.stallExit > 0) || pos.tp2Done) stallPending = null;
+  // Same enforcement for the clip: the rule exists only while its switch
+  // is on and the position is pre-TP1 — banking TP1 (or flipping
+  // ENTRY_CLIP off) drops any carried pending, so no stale stamp can
+  // execute in a stage the rule does not own.
+  if (!(cfg.entryClip > 0) || pos.tp1Done || pos.tp2Done) clipPending = null;
   // Staged moonbag dead-flow state (user order 2026-10-16 ~20:15 EDT,
   // sections 3c2/3c3): bagDeadWaves counts the dead-flow waves that have
   // sold on this bag (0, 1, 2 — a count of SOLD waves, never decremented);
@@ -363,9 +375,9 @@ export function evaluateExit(pos, mark, cfg, now) {
   // section 4b), so no clock that matured during the takeover can fire. Takeover
   // supersedes protect: with both flags set, this return wins and nothing judges.
   const taken = !!pos.takenOver;
-  const out = (fraction, reason) => ({ fraction, reason, newPeak: peakRatio, newPeakMove: peakMove, ratio, stallSince: null, stopArmedTs, floorChecks, floorSince, probationSince, tp1Arm, moveHist, exitPending, exitConfirmEvents, protectedBlock, killZone, postTp1PeakMove, killzoneEvents, deadflowArmed, deadflowEvents, stallPending, stallEvents, bagDeadWaves, bagDeadHot, bagTrailSince, bagFloorSince, bagTp2Ratio, bagTrimDone });
+  const out = (fraction, reason) => ({ fraction, reason, newPeak: peakRatio, newPeakMove: peakMove, ratio, stallSince: null, stopArmedTs, floorChecks, floorSince, probationSince, tp1Arm, moveHist, exitPending, exitConfirmEvents, protectedBlock, killZone, postTp1PeakMove, killzoneEvents, deadflowArmed, deadflowEvents, stallPending, stallEvents, clipPending, bagDeadWaves, bagDeadHot, bagTrailSince, bagFloorSince, bagTp2Ratio, bagTrimDone });
   if (taken) {
-    stopArmedTs = null; floorChecks = 0; floorSince = null; probationSince = null; tp1Arm = null; stallPending = null; bagDeadHot = false; bagTrailSince = null; bagFloorSince = null;
+    stopArmedTs = null; floorChecks = 0; floorSince = null; probationSince = null; tp1Arm = null; stallPending = null; clipPending = null; bagDeadHot = false; bagTrailSince = null; bagFloorSince = null;
     if (exitPending != null) exitPending = {};
     return { ...out(0, null), takenOver: true };
   }
@@ -986,21 +998,35 @@ export function evaluateExit(pos, mark, cfg, now) {
   }
 
   // 5a. ENTRY CLIP (owner order 2026-10-18 17:56 EDT — "adding the 3m timer
-  //     at the entry stall point like we had before — −7% we clip out"): the
-  //     price counterpart the stall exit (5) deliberately lacks. From
-  //     ENTRY_CLIP_SEC of age, a pre-TP1 position whose round-trip move is
-  //     at/below −ENTRY_CLIP_PCT sells in full — no flow conjunction, no
-  //     confirm window: the entry has had its 3 minutes and is underwater
-  //     by his line. Judged on `move` like the dip stop, so it fires on
-  //     what the price did, not on sunk fees. Scope is pre-TP1 only: TP1
-  //     banking proves the entry worked and hands the position to the
-  //     middle/moonbag judges; TP2 is further out of scope still. PROTECT
-  //     does not block it (same posture as the stall exit beside it);
-  //     TAKEOVER returned long before this section.
+  //     at the entry stall point like we had before — −7% we clip out";
+  //     AMENDED by the owner 2026-10-18 20:28 EDT — "don't sell right away
+  //     at the −7% — give it a 1m confirmation there"): the price
+  //     counterpart the stall exit (5) deliberately lacks. From
+  //     ENTRY_CLIP_SEC of age, a pre-TP1 position whose round-trip move
+  //     reaches −ENTRY_CLIP_PCT does NOT sell on the spot: the first
+  //     breached check stamps the pending, and the sell executes at the
+  //     first check at/after pending + ENTRY_CLIP_CONFIRM_SEC where the
+  //     move is STILL at/below the line — the same confirm shape as the
+  //     stall exit beside it. Any intervening check back above the line
+  //     cancels the pending outright; a later breach starts a fresh
+  //     window. ENTRY_CLIP_CONFIRM_SEC=0 restores the original instant
+  //     form. No flow conjunction: price alone arms and fires it. Judged
+  //     on `move` like the dip stop, so it fires on what the price did,
+  //     not on sunk fees. Scope is pre-TP1 only: TP1 banking proves the
+  //     entry worked and hands the position to the middle/moonbag judges;
+  //     TP2 is further out of scope still. PROTECT does not block it (same
+  //     posture as the stall exit beside it); TAKEOVER returned long
+  //     before this section.
   if (cfg.entryClip > 0 && !pos.tp1Done && !pos.tp2Done) {
     const ageOk = heldMin * 60 >= (cfg.entryClipSec || 0);
-    if (ageOk && move <= 1 - (cfg.entryClipPct || 0)) {
-      return out(1, `entry clip (${((move - 1) * 100).toFixed(1)}% at ${Math.floor(heldMin * 60)}s — stalled entry)`);
+    const breached = ageOk && move <= 1 - (cfg.entryClipPct || 0);
+    if (breached) {
+      if (clipPending == null) clipPending = now;
+      if (now - clipPending >= (cfg.entryClipConfirmSec || 0) * 1000) {
+        return out(1, `entry clip (${((move - 1) * 100).toFixed(1)}% at ${Math.floor(heldMin * 60)}s — held under the −${((cfg.entryClipPct || 0) * 100).toFixed(0)}% line through the ${cfg.entryClipConfirmSec}s confirm)`);
+      }
+    } else if (clipPending != null) {
+      clipPending = null; // back above the line inside the window: the pending dies
     }
   }
 
