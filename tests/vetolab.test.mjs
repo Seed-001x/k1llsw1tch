@@ -14,7 +14,8 @@ import { Journal } from '../src/journal.js';
 import { Bot } from '../src/bot.js';
 import { Executor } from '../src/exec.js';
 import { startServer } from '../src/server.js';
-import { evaluateVetoes, parseLinkedDrainReason, linkedDrainFromChecks, buildVetoCard, r8PostPumpBounce, entryQualityStamp, EQ_VOLM5_TERCILE_LOW, EQ_VOLM5_TERCILE_HIGH, VETO_RULES } from '../src/vetoLab.js';
+import { evaluateVetoes, parseLinkedDrainReason, linkedDrainFromChecks, buildVetoCard, r8PostPumpBounce, entryQualityStamp, liveTapeStamp, EQ_VOLM5_TERCILE_LOW, EQ_VOLM5_TERCILE_HIGH, VETO_RULES } from '../src/vetoLab.js';
+import { newCensus, censusFold } from '../src/census.js';
 import { tmp, testCfg, view } from './helpers.mjs';
 
 const T0 = 1_000_000_000_000;
@@ -426,4 +427,76 @@ test('veto: HTTP surface — /vetoshadow serves the card, empty and populated', 
     assert.equal(card.totals.takenLive, 0);
     assert.equal(card.totals.skippedSignals, 1);
   } finally { srv.close(); }
+});
+
+// ------------------------------------------------------------ live-tape shadow (owner order 2026-10-19 21:37)
+test('livetape: stamp verdict math — pass, buys<sells, uniq<N, and the dial is read live', () => {
+  assert.deepEqual(liveTapeStamp({ buys: 10, sells: 5, uniqBuyers: 8 }, 5),
+    { buys: 10, sells: 5, uniqBuyers: 8, windowMin: 2, wouldSkip: false });
+  assert.equal(liveTapeStamp({ buys: 3, sells: 9, uniqBuyers: 20 }, 5).wouldSkip, true, 'buys < sells skips however broad the buyer set');
+  assert.equal(liveTapeStamp({ buys: 30, sells: 10, uniqBuyers: 4 }, 5).wouldSkip, true, 'uniqBuyers < N skips however strong the counts');
+  assert.equal(liveTapeStamp({ buys: 30, sells: 10, uniqBuyers: 5 }, 5).wouldSkip, false, 'uniqBuyers == N passes (the line is <)');
+  assert.equal(liveTapeStamp({ buys: 30, sells: 10, uniqBuyers: 4 }, 3).wouldSkip, false, 'a lower dial re-judges the same tape');
+  // the Rockstar census shape: 1 buy / 899 sells / 1 unique buyer
+  assert.equal(liveTapeStamp({ buys: 1, sells: 899, uniqBuyers: 1 }, 5).wouldSkip, true);
+});
+
+test('livetape: null and partial samples stamp nulls — unknown, never a guessed verdict', () => {
+  const blank = { buys: null, sells: null, uniqBuyers: null, windowMin: 2, wouldSkip: null };
+  assert.deepEqual(liveTapeStamp(null, 5), blank);
+  assert.deepEqual(liveTapeStamp(undefined, 5), blank);
+  assert.deepEqual(liveTapeStamp('junk', 5), blank);
+  const partial = liveTapeStamp({ buys: 7 }, 5);
+  assert.equal(partial.buys, 7);
+  assert.equal(partial.wouldSkip, null, 'a partial sample cannot judge');
+});
+
+test('livetape: scoreboard aggregates wouldSkip vs pass with joined r60, noSample counted apart', () => {
+  const rec = (id, liveTape, basis = 'signal') => ({ kind: 'veto', id, ts: T0, basis, mint: 'M' + id, symbol: 'X', setup: 'pop', decision: 'taken', rules: ['R4'], signalId: id, liveTape });
+  const recs = [
+    rec('A', { buys: 1, sells: 9, uniqBuyers: 1, windowMin: 2, wouldSkip: true }),
+    rec('B', { buys: 2, sells: 8, uniqBuyers: 3, windowMin: 2, wouldSkip: true }),
+    rec('C', { buys: 20, sells: 5, uniqBuyers: 12, windowMin: 2, wouldSkip: false }),
+    rec('D', { buys: null, sells: null, uniqBuyers: null, windowMin: 2, wouldSkip: null }),
+    rec('E', { buys: 1, sells: 9, uniqBuyers: 1, windowMin: 2, wouldSkip: true }, 'close'), // close-basis: excluded
+    { kind: 'veto', id: 'F', ts: T0, basis: 'signal', mint: 'MF', symbol: 'X', setup: 'pop', decision: 'taken', rules: ['R4'], signalId: 'F' }, // pre-stamp record: excluded
+  ];
+  const outcomes = {
+    A: { done: true, r15: -0.5, r60: -0.8 },
+    B: { done: true, r15: -0.2, r60: -0.4 },
+    C: { done: true, r15: 0.3, r60: 0.6 },
+    D: { done: true, r15: 0.1, r60: 0.2 },
+  };
+  const card = buildVetoCard(recs, (id) => outcomes[id] || null);
+  assert.equal(card.liveTape.total, 4);
+  assert.equal(card.liveTape.noSample, 1);
+  assert.deepEqual(card.liveTape.wouldSkip, { n: 2, finalized: 2, medianR60: -0.6, shareR60Positive: 0 });
+  assert.deepEqual(card.liveTape.pass, { n: 1, finalized: 1, medianR60: 0.6, shareR60Positive: 1 });
+  assert.equal(card.recent.find(x => x.mint === 'MA').liveTape.wouldSkip, true, 'recent rows carry the stamp for the dashboard');
+});
+
+test('livetape: bot stamps the retained pre-entry census on the veto record; an unwatched mint stamps noSample', async () => {
+  const dir = tmp();
+  const bot = rigBot(dir);
+  // a finished bottom watch's census: last-2-min tape of 2 buys (one wallet) vs 9 sells
+  const census = newCensus(T0 - 60000);
+  censusFold(census, { trader: 'w1', side: 'buy', tokens: 10, ts: T0 - 30000 }, T0 - 30000);
+  censusFold(census, { trader: 'w1', side: 'buy', tokens: 10, ts: T0 - 20000 }, T0 - 20000);
+  for (let i = 0; i < 9; i++) censusFold(census, { trader: 's' + i, side: 'sell', tokens: 10, ts: T0 - 15000 }, T0 - 15000);
+  bot._censusStash = new Map([['TAPEMINT', { census, ts: T0 }]]); // rigBot's clock stands at T0
+  const hot = view({ address: 'TAPEMINT', symbol: 'TAPE', chgM5: 33, chgH1: 10, createdAt: T0 - 3600e3 });
+  bot.skip(hot, { setup: 'pop', metrics: {} }, ['some gate'], [], {}, true);
+  const recs = readVeto(dir);
+  assert.equal(recs.length, 1);
+  assert.deepEqual(recs[0].liveTape, { buys: 2, sells: 9, uniqBuyers: 1, windowMin: 2, wouldSkip: true });
+  // no census anywhere for this mint: nulls, counted as noSample on the card
+  const hot2 = view({ address: 'BAREMINT', symbol: 'BARE', chgM5: 33, chgH1: 10, createdAt: T0 - 3600e3 });
+  bot.skip(hot2, { setup: 'pop', metrics: {} }, ['some gate'], [], {}, true);
+  const recs2 = readVeto(dir);
+  assert.equal(recs2.length, 2);
+  assert.deepEqual(recs2[1].liveTape, { buys: null, sells: null, uniqBuyers: null, windowMin: 2, wouldSkip: null });
+  const card = bot.vetoCard();
+  assert.equal(card.liveTape.total, 2);
+  assert.equal(card.liveTape.noSample, 1);
+  assert.equal(card.liveTape.wouldSkip.n, 1);
 });

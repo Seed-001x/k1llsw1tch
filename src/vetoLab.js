@@ -46,6 +46,22 @@
 // chgH24 >= +100% at flag time, the Gemma/KIM pattern: catching those is
 // a core goal). The tag is descriptive only; it changes no rule's fire.
 //
+// Live-tape stamp (owner order 2026-10-19 21:37 EDT): every journaled
+// record also carries a liveTape stamp — the entry-moment BUY-SIDE tape
+// from the wallet census, last 2 minutes: { buys, sells, uniqBuyers,
+// windowMin: 2, wouldSkip }. The bot's other checks measure how much
+// traded, never direction; the census is the one instrument that sees
+// who is buying. wouldSkip = buys < sells OR uniqBuyers <
+// LIVE_TAPE_MIN_UNIQ (default 5) — a one-buyer tape like Rockstar's
+// 1-buy/899-sell census is the shape it exists to catch. SHADOW ONLY,
+// like everything here: no blocking mode exists in this build; the raw
+// counts ride the record so any threshold re-judges offline, and
+// promotion is a separate owner call gated on beating random. When no
+// census sample exists for the mint at the decision moment the stamp is
+// nulls with wouldSkip: null — the scoreboard's noSample bucket (the
+// codebase's missing-data posture for shadow fields: unstamped is
+// unknown, never a guessed verdict).
+//
 // Entry-quality stamp (owner decision #1, 2026-10-19 20:05 EDT, from the
 // step-4 fingerprint report §9): every journaled record also carries an
 // entryQuality stamp — the flag-time entry snapshot's activity fields
@@ -172,6 +188,27 @@ export function entryQualityStamp(s) {
   } catch { return blank; }
 }
 
+export const LIVE_TAPE_WINDOW_MIN = 2;
+
+/** The live-tape stamp for one journaled record (owner order
+ *  2026-10-19): `sample` is the census's last-2-minute read for the mint
+ *  at the decision moment ({ buys, sells, uniqBuyers }) or null when no
+ *  census covers the mint. Raw counts ride along verbatim; wouldSkip is
+ *  the shadow verdict at the LIVE_TAPE_MIN_UNIQ dial — buys < sells OR
+ *  uniqBuyers < minUniq. A null (or partial) sample stamps nulls with
+ *  wouldSkip: null — unknown, never a guessed verdict, counted by the
+ *  scoreboard as noSample. Pure and total: it cannot throw. */
+export function liveTapeStamp(sample, minUniq) {
+  const blank = { buys: null, sells: null, uniqBuyers: null, windowMin: LIVE_TAPE_WINDOW_MIN, wouldSkip: null };
+  try {
+    if (!sample || typeof sample !== 'object') return blank;
+    const buys = num(sample.buys), sells = num(sample.sells), uniqBuyers = num(sample.uniqBuyers);
+    if (buys == null || sells == null || uniqBuyers == null) return { ...blank, buys, sells, uniqBuyers };
+    const n = Number.isFinite(Number(minUniq)) && minUniq != null ? Number(minUniq) : 5;
+    return { buys, sells, uniqBuyers, windowMin: LIVE_TAPE_WINDOW_MIN, wouldSkip: buys < sells || uniqBuyers < n };
+  } catch { return blank; }
+}
+
 /** The /vetoshadow scorecard over would-veto records, outcomes joined at
  *  read time via outcomeOf(signalId) -> the signal's tracked outcome (or
  *  null while still tracking / aged out). Per rule: how many signals it
@@ -249,15 +286,29 @@ export function buildVetoCard(records, outcomeOf) {
     },
     deadTape: { wouldSkip: deadAgg.n, finalized: deadAgg.finalized, medianR60: deadAgg.medianR60, shareR60Positive: deadAgg.shareR60Positive },
   };
+  // Live-tape scoreboard (owner order 2026-10-19): the same read-time
+  // outcome joins, cut by the stamp's shadow verdict. Only records
+  // carrying the stamp count (signal-basis records journaled since the
+  // stamp shipped — close-basis R1 records carry no entry-moment census
+  // sample and are excluded, never back-filled). wouldSkip: null is the
+  // noSample bucket: no census covered the mint at decision time.
+  const ltStamped = joined.filter(x => x.r.liveTape && typeof x.r.liveTape === 'object' && x.r.basis !== 'close');
+  const liveTape = {
+    total: ltStamped.length,
+    noSample: ltStamped.filter(x => x.r.liveTape.wouldSkip == null).length,
+    wouldSkip: bandAgg(ltStamped.filter(x => x.r.liveTape.wouldSkip === true)),
+    pass: bandAgg(ltStamped.filter(x => x.r.liveTape.wouldSkip === false)),
+  };
   const recent = joined.slice(-12).reverse().map(({ r, out }) => ({
     ts: r.ts, mint: r.mint, symbol: r.symbol || null, setup: r.setup || null,
     decision: r.decision || null, basis: r.basis || 'signal', rules: r.rules,
     reason: r.reason || null, pnlSol: r.pnlSol ?? null,
     entryQuality: r.entryQuality ?? null,
+    liveTape: r.liveTape ?? null,
     out: out ? { done: !!out.done, r15: out.r15 ?? null, r60: out.r60 ?? null, maxRet: out.maxRet ?? null, partial: !!out.partial } : null,
   }));
   return {
-    perRule, totals, entryQuality, recent,
+    perRule, totals, entryQuality, liveTape, recent,
     notes: [
       'shadow only — no rule blocks, delays, or alters any entry; promotion is one rule at a time on the owner\'s call, and only for a rule that clearly beats a random block',
       'live column = would-vetoed signals the bot actually took (real entries the rule would have stopped); shadow column = all would-vetoes',
@@ -265,6 +316,7 @@ export function buildVetoCard(records, outcomeOf) {
       'a rule fires only when every feature it reads was stamped; unstamped features are untestable, never guessed',
       'R8 records carry postPumpBounce: the coin had already pumped (chgH1 >= +50% or chgH24 >= +100%) before the flagged dump — the Gemma/KIM pattern, counted on the R8 aggregate',
       'entryQuality (step-4 fingerprint, record-only): each record is stamped with its flag-time entry activity (volM5/buysM5/sellsM5/chgH1) banded by the fingerprint base\'s volM5 terciles; deadTape = the low band, a skip CANDIDATE under the beats-random gate — it skips nothing, and its records keep the bot\'s real decision',
+      'liveTape (record-only): each signal-basis record is stamped with the wallet census\'s last-2-minute buy-side tape at the decision moment {buys, sells, uniqBuyers, wouldSkip} — wouldSkip = buys < sells OR uniqBuyers < LIVE_TAPE_MIN_UNIQ (default 5); it skips nothing and has NO blocking mode; records with no census sample count as noSample; raw counts ride the record so any threshold re-judges offline',
     ],
   };
 }

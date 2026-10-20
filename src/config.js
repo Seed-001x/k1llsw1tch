@@ -706,6 +706,8 @@ export function loadConfig(env = process.env) {
     // One-sided tape veto (owner order 2026-10-19, the Rockstar census gap): sells >= RATIO x buys in the watch, OR the whole buy side is at most MAX_UNIQ wallets — a one-way exit stampede / single-buyer tape the buyer-side signatures cannot see.
     preEntryOneSidedRatio: num(env, 'PREENTRY_ONESIDED_RATIO', 10),
     preEntryOneSidedMaxUniq: num(env, 'PREENTRY_ONESIDED_MAX_UNIQ', 1),
+    // LIVE-TAPE SHADOW (owner order 2026-10-19 21:37 EDT, record-only): every veto-shadow record is stamped with the entry-moment buy-side census tape (last 2 min: buys / sells / unique buyers) and a shadow verdict — wouldSkip when buys < sells OR unique buyers < LIVE_TAPE_MIN_UNIQ. NO blocking mode exists in this build; promotion is a separate owner call gated on beating random. No census sample for the mint stamps nulls (the scoreboard's noSample bucket).
+    liveTapeMinUniq: num(env, 'LIVE_TAPE_MIN_UNIQ', 5),
     dipStopPct: num(env, 'DIP_STOP_PCT', 0.05),           // sell if PRICE drops this far below entry (0 = off)
     stallSec: num(env, 'STALL_SEC', 60),                  // entry stall: sell if price never breaks out within this many seconds of entry (0 = off)
     stallBandPct: num(env, 'STALL_BAND_PCT', 0.05),       // entry range half-width: at stallSec the price must be OUTSIDE entry ± this or the position sells (user 2026-10-13 endpoint version)

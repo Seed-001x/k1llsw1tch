@@ -44,7 +44,7 @@ import { evaluatePreEntry, preEntryReason } from './preEntry.js';
 import { execPoolOf, wrongPoolVerdict } from './exec.js';
 import { fetchPairView } from './sources.js';
 import { evaluateGrind, grindReason, grindKillTally } from './grindJudge.js';
-import { evaluateVetoes, linkedDrainFromChecks, r8PostPumpBounce, entryQualityStamp } from './vetoLab.js';
+import { evaluateVetoes, linkedDrainFromChecks, r8PostPumpBounce, entryQualityStamp, liveTapeStamp, LIVE_TAPE_WINDOW_MIN } from './vetoLab.js';
 
 // Scan Ledger: a watch session finalizes at this age even if the coin is
 // still being viewed (a re-view afterward starts a fresh session).
@@ -1986,6 +1986,33 @@ export class Bot {
    *  this evaluation produced one, else measures on the spot from the same
    *  sampled history with the same function. R1 (fakeAlive) has no
    *  entry-time value and is judged at close instead — see _noteVetoClose. */
+  /** The entry-moment census sample for the live-tape shadow stamp
+   *  (owner order 2026-10-19): the mint's wallet census read over the
+   *  trailing LIVE_TAPE_WINDOW_MIN minutes, from whichever census the
+   *  existing budget already keeps — an open position's census, a live
+   *  pre-entry watch's census, or the retained census of a just-finished
+   *  pre-entry watch (the bottom door's sample). No census covers the
+   *  mint -> null (the stamp's noSample case): the check never starts a
+   *  subscription of its own and never waits for one, so it cannot
+   *  delay an entry. Fail-silent like every observer read here. */
+  _liveTapeSample(mint, n) {
+    try {
+      const winMs = LIVE_TAPE_WINDOW_MIN * 60000;
+      const read = (census) => {
+        if (!census) return null;
+        const w = censusWindow(census, n, winMs);
+        return w ? { buys: w.buys, sells: w.sells, uniqBuyers: w.uniqBuyers } : null;
+      };
+      const pos = this.positions.find(p => p.mint === mint);
+      if (pos && pos.census) { const s = read(pos.census); if (s) return s; }
+      const watch = this.preEntryWatch && this.preEntryWatch.get(mint);
+      if (watch && watch.census) { const s = read(watch.census); if (s) return s; }
+      const stash = this._censusStash && this._censusStash.get(mint);
+      if (stash && n - stash.ts <= 10 * 60000) { const s = read(stash.census); if (s) return s; }
+      return null;
+    } catch { return null; }
+  }
+
   _noteVetoShadow({ v, sig, checks = null, shadowGates = null, decision, reasons = [], signalId = null }) {
     try {
       if (!v || !v.address) return;
@@ -2027,6 +2054,10 @@ export class Bot {
       // Record-only like the rest of this shadow; its deadTape flag is a
       // skip candidate the scoreboard watches, never a skip (see vetoLab).
       rec.entryQuality = entryQualityStamp({ volM5: v.volM5, buysM5: v.buysM5, sellsM5: v.sellsM5, chgH1: f.chgH1 });
+      // Live-tape stamp (owner order 2026-10-19, SHADOW ONLY): the
+      // entry-moment buy-side census tape, judged by nobody — wouldSkip
+      // is a scoreboard verdict, and this build has no blocking mode.
+      rec.liveTape = liveTapeStamp(this._liveTapeSample(v.address, n), this.cfg.liveTapeMinUniq ?? 5);
       this.journal.vetoShadow(rec);
     } catch { /* shadow only — never disturb the signal path */ }
   }
@@ -3165,6 +3196,13 @@ export class Bot {
         }
         // Window closed — finalize exactly once.
         w.done = true; this.preEntryWatch.delete(mint);
+        // Retain the finished watch's census briefly: the entry it was
+        // guarding is decided in the next moments, and the live-tape
+        // shadow stamp reads its last-2-minute window as the bottom
+        // door's entry-moment sample (observer bookkeeping only).
+        this._censusStash = this._censusStash || new Map();
+        this._censusStash.set(mint, { census: w.census, ts: n });
+        for (const [m, s] of this._censusStash) if (n - s.ts > 10 * 60000) this._censusStash.delete(m);
         this._syncCensus();
         const views = await this.d.fetchViews([mint]).catch(() => null);
         const fv = (views && views.get(mint)) || w.view;
