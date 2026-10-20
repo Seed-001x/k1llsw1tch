@@ -42,7 +42,7 @@ import { sampleFakeAlive, fakeAliveStamp, fakeAliveWindow } from './fakeAlive.js
 import { newCensus, censusFold, censusWindow, censusStamp } from './census.js';
 import { evaluatePreEntry, preEntryReason } from './preEntry.js';
 import { evaluateGrind, grindReason, grindKillTally } from './grindJudge.js';
-import { evaluateVetoes, linkedDrainFromChecks, r8PostPumpBounce } from './vetoLab.js';
+import { evaluateVetoes, linkedDrainFromChecks, r8PostPumpBounce, entryQualityStamp } from './vetoLab.js';
 
 // Scan Ledger: a watch session finalizes at this age even if the coin is
 // still being viewed (a re-view afterward starts a fresh session).
@@ -2011,6 +2011,12 @@ export class Bot {
       // records only — had this coin already pumped before the flagged
       // dump? Descriptive like everything in this shadow; read by nobody.
       if (rules.includes('R8')) rec.postPumpBounce = r8PostPumpBounce(f, rules);
+      // Entry-quality stamp (owner decision #1, 2026-10-19): the flag-time
+      // entry activity off the same view the pipeline judged, on EVERY
+      // journaled record — taken, skipped, and shadow decisions alike.
+      // Record-only like the rest of this shadow; its deadTape flag is a
+      // skip candidate the scoreboard watches, never a skip (see vetoLab).
+      rec.entryQuality = entryQualityStamp({ volM5: v.volM5, buysM5: v.buysM5, sellsM5: v.sellsM5, chgH1: f.chgH1 });
       this.journal.vetoShadow(rec);
     } catch { /* shadow only — never disturb the signal path */ }
   }
@@ -2039,6 +2045,10 @@ export class Bot {
         mint: pos.mint, symbol: pos.symbol || null, setup: pos.setup || null, decision: 'taken',
         reason: full.reason || null, rules: ['R1'],
         features: { setup: pos.setup || null, chgM5: e.chgM5 ?? null, chgH1: e.chgH1 ?? null, chgH24: e.chgH24 ?? null, ageMin: e.ageMin ?? null, linkedDrain: e.linkedDrain ?? null, topGuardDistPct: null, topGuardHighAgeSec: null, fakeAliveShare: share },
+        // Entry-quality stamp (owner decision #1, 2026-10-19): close-basis
+        // records stamp from the position's entry snapshot — the same
+        // fields the signal-basis stamp reads off the live view.
+        entryQuality: entryQualityStamp({ volM5: e.volM5, buysM5: e.buysM5, sellsM5: e.sellsM5, chgH1: e.chgH1 }),
         signalId, posId: pos.id, mc: pos.entryMc ?? null, price: pos.entryPrice ?? null,
         pnlSol: full.pnlSol ?? null, pnlPct: full.pnlPct ?? null,
       });

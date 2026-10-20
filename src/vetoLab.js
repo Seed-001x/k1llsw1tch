@@ -45,6 +45,18 @@
 // had ALREADY pumped before the flagged dump (chgH1 >= +50% or
 // chgH24 >= +100% at flag time, the Gemma/KIM pattern: catching those is
 // a core goal). The tag is descriptive only; it changes no rule's fire.
+//
+// Entry-quality stamp (owner decision #1, 2026-10-19 20:05 EDT, from the
+// step-4 fingerprint report §9): every journaled record also carries an
+// entryQuality stamp — the flag-time entry snapshot's activity fields
+// (volM5 / buysM5 / sellsM5 / chgH1) banded by 5-minute volume against
+// the fingerprint base's terciles. Step 4 found total 5m activity is the
+// one real winner/loser separator (volM5 AUC 0.608; win rate by tercile
+// 25% -> 33% -> 44%); the bottom tercile is the "dead tape" cohort
+// (22-25% win rate), shadowed here as a skip CANDIDATE under the owner's
+// beats-random gate. The stamp is a scoreboard, not a gate: deadTape is
+// a flag on the record, the bot's real decision stands untouched beside
+// it, and nothing is ever skipped because of it.
 import { mean, median, round } from './util.js';
 
 export const VETO_RULES = [
@@ -127,6 +139,39 @@ export function r8PostPumpBounce(f, rules) {
   } catch { return false; }
 }
 
+/** Entry-quality tercile cutoffs for entry volM5 (USD volume over the
+ *  trailing 5 minutes at flag time), from the step-4 fingerprint base:
+ *  n=244 feature-bearing closes (83 W / 161 L), ks2-scratch/rows.json
+ *  joined to each close's entry.volM5 (ks2-scratch/trades.json),
+ *  computed 2026-10-19. The base's tercile segments ran
+ *  [0 .. 13,062.89] / [13,155.71 .. 27,486.32] / [27,529.46 .. 349,820.03]
+ *  with win rates 25% / 33% / 44%; these constants are the 33 1/3 and
+ *  66 2/3 percentiles of that distribution. Frozen on purpose: the
+ *  out-of-sample scoreboard judges new records against the SAME lines
+ *  the fingerprint drew, never a silently re-based set. */
+export const EQ_VOLM5_TERCILE_LOW = 13155.71;  // volM5 < this -> activityBand 'low'
+export const EQ_VOLM5_TERCILE_HIGH = 27529.46; // volM5 >= this -> 'high'; between -> 'mid'
+
+/** The entry-quality stamp for one journaled record (owner decision #1,
+ *  2026-10-19): the flag-time entry snapshot's activity fields, read with
+ *  the same numeric coercion learn.snapshotFeatures stamps them with.
+ *  Raw values ride along (null when the pipeline never produced them —
+ *  unstamped is unknown, never a guessed zero). activityBand bands volM5
+ *  by the frozen step-4 terciles; deadTape is exactly the low band, the
+ *  shadowed skip candidate — a flag only: the record's own decision
+ *  field is the bot's real, untouched outcome. Pure and total. */
+export function entryQualityStamp(s) {
+  const blank = { volM5: null, buysM5: null, sellsM5: null, chgH1: null, activityBand: null, deadTape: false };
+  try {
+    if (!s || typeof s !== 'object') return blank;
+    const volM5 = num(s.volM5), buysM5 = num(s.buysM5), sellsM5 = num(s.sellsM5), chgH1 = num(s.chgH1);
+    const activityBand = volM5 == null ? null
+      : volM5 < EQ_VOLM5_TERCILE_LOW ? 'low'
+      : volM5 < EQ_VOLM5_TERCILE_HIGH ? 'mid' : 'high';
+    return { volM5, buysM5, sellsM5, chgH1, activityBand, deadTape: activityBand === 'low' };
+  } catch { return blank; }
+}
+
 /** The /vetoshadow scorecard over would-veto records, outcomes joined at
  *  read time via outcomeOf(signalId) -> the signal's tracked outcome (or
  *  null while still tracking / aged out). Per rule: how many signals it
@@ -176,20 +221,50 @@ export function buildVetoCard(records, outcomeOf) {
     shadowSignals: sigRecs.filter(r => r.decision === 'shadow').length,
     r1TakenCloses: closeRecs.length,
   };
+  // Entry-quality scoreboard (owner decision #1, 2026-10-19): the same
+  // read-time outcome joins, cut by the stamp's activity band. Only
+  // records carrying the stamp count — records journaled before the
+  // stamp shipped are excluded, never back-filled. deadTape (the low
+  // band) is the shadowed skip candidate: wouldSkip counts the records
+  // it WOULD have skipped; every one kept the bot's real decision.
+  const stamped = joined.filter(x => x.r.entryQuality && typeof x.r.entryQuality === 'object');
+  const bandAgg = (arr) => {
+    const fin = arr.filter(x => x.out && x.out.done);
+    const r60 = fin.map(x => x.out.r60).filter(Number.isFinite);
+    return {
+      n: arr.length,
+      finalized: fin.length,
+      medianR60: r60.length ? round(median(r60)) : null,
+      shareR60Positive: r60.length ? round(r60.filter(x => x > 0).length / r60.length, 3) : null,
+    };
+  };
+  const deadAgg = bandAgg(stamped.filter(x => x.r.entryQuality.deadTape === true));
+  const entryQuality = {
+    total: stamped.length,
+    noBand: stamped.filter(x => x.r.entryQuality.activityBand == null).length,
+    bands: {
+      low: bandAgg(stamped.filter(x => x.r.entryQuality.activityBand === 'low')),
+      mid: bandAgg(stamped.filter(x => x.r.entryQuality.activityBand === 'mid')),
+      high: bandAgg(stamped.filter(x => x.r.entryQuality.activityBand === 'high')),
+    },
+    deadTape: { wouldSkip: deadAgg.n, finalized: deadAgg.finalized, medianR60: deadAgg.medianR60, shareR60Positive: deadAgg.shareR60Positive },
+  };
   const recent = joined.slice(-12).reverse().map(({ r, out }) => ({
     ts: r.ts, mint: r.mint, symbol: r.symbol || null, setup: r.setup || null,
     decision: r.decision || null, basis: r.basis || 'signal', rules: r.rules,
     reason: r.reason || null, pnlSol: r.pnlSol ?? null,
+    entryQuality: r.entryQuality ?? null,
     out: out ? { done: !!out.done, r15: out.r15 ?? null, r60: out.r60 ?? null, maxRet: out.maxRet ?? null, partial: !!out.partial } : null,
   }));
   return {
-    perRule, totals, recent,
+    perRule, totals, entryQuality, recent,
     notes: [
       'shadow only — no rule blocks, delays, or alters any entry; promotion is one rule at a time on the owner\'s call, and only for a rule that clearly beats a random block',
       'live column = would-vetoed signals the bot actually took (real entries the rule would have stopped); shadow column = all would-vetoes',
       'R1 (fakeAlive) is judged at position close — the share is sampled over a hold, so it has no entry-time value; its records are taken closes and carry realized PnL',
       'a rule fires only when every feature it reads was stamped; unstamped features are untestable, never guessed',
       'R8 records carry postPumpBounce: the coin had already pumped (chgH1 >= +50% or chgH24 >= +100%) before the flagged dump — the Gemma/KIM pattern, counted on the R8 aggregate',
+      'entryQuality (step-4 fingerprint, record-only): each record is stamped with its flag-time entry activity (volM5/buysM5/sellsM5/chgH1) banded by the fingerprint base\'s volM5 terciles; deadTape = the low band, a skip CANDIDATE under the beats-random gate — it skips nothing, and its records keep the bot\'s real decision',
     ],
   };
 }

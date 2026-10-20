@@ -14,7 +14,7 @@ import { Journal } from '../src/journal.js';
 import { Bot } from '../src/bot.js';
 import { Executor } from '../src/exec.js';
 import { startServer } from '../src/server.js';
-import { evaluateVetoes, parseLinkedDrainReason, linkedDrainFromChecks, buildVetoCard, r8PostPumpBounce, VETO_RULES } from '../src/vetoLab.js';
+import { evaluateVetoes, parseLinkedDrainReason, linkedDrainFromChecks, buildVetoCard, r8PostPumpBounce, entryQualityStamp, EQ_VOLM5_TERCILE_LOW, EQ_VOLM5_TERCILE_HIGH, VETO_RULES } from '../src/vetoLab.js';
 import { tmp, testCfg, view } from './helpers.mjs';
 
 const T0 = 1_000_000_000_000;
@@ -276,6 +276,133 @@ test('veto: R1 is judged at close on the final fake-alive stamp', () => {
   assert.equal(card.perRule.R1.taken, 1);
   assert.equal(card.perRule.R1.realizedPnlSol, -0.0712);
   assert.equal(card.totals.r1TakenCloses, 1);
+});
+
+test('entryQuality: stamp bands volM5 at the frozen step-4 terciles, dead tape is the low band only', () => {
+  // the cutoffs themselves: the step-4 base's 33 1/3 / 66 2/3 percentiles
+  // (n=244, computed 2026-10-19 — see vetoLab.js for the derivation)
+  assert.equal(EQ_VOLM5_TERCILE_LOW, 13155.71);
+  assert.equal(EQ_VOLM5_TERCILE_HIGH, 27529.46);
+  // low band, right up to the line — and dead tape
+  assert.deepEqual(entryQualityStamp({ volM5: 0, buysM5: 3, sellsM5: 9, chgH1: -4 }),
+    { volM5: 0, buysM5: 3, sellsM5: 9, chgH1: -4, activityBand: 'low', deadTape: true });
+  assert.equal(entryQualityStamp({ volM5: 13062.89 }).activityBand, 'low'); // the base's own low-segment max
+  assert.equal(entryQualityStamp({ volM5: 13155.70 }).activityBand, 'low');
+  assert.equal(entryQualityStamp({ volM5: 13155.70 }).deadTape, true);
+  // at the line -> mid (the base's mid segment starts at 13,155.71)
+  assert.equal(entryQualityStamp({ volM5: 13155.71 }).activityBand, 'mid');
+  assert.equal(entryQualityStamp({ volM5: 13155.71 }).deadTape, false);
+  assert.equal(entryQualityStamp({ volM5: 20000 }).activityBand, 'mid');
+  assert.equal(entryQualityStamp({ volM5: 27486.32 }).activityBand, 'mid'); // the base's mid-segment max
+  assert.equal(entryQualityStamp({ volM5: 27529.45 }).activityBand, 'mid');
+  // at the high line -> high (the base's high segment starts at 27,529.46)
+  assert.equal(entryQualityStamp({ volM5: 27529.46 }).activityBand, 'high');
+  assert.equal(entryQualityStamp({ volM5: 349820.03 }).activityBand, 'high'); // the base's max
+  assert.equal(entryQualityStamp({ volM5: 27529.46 }).deadTape, false);
+  // raw fields ride along untouched
+  assert.deepEqual(entryQualityStamp({ volM5: 50000, buysM5: 30, sellsM5: 10, chgH1: 5 }),
+    { volM5: 50000, buysM5: 30, sellsM5: 10, chgH1: 5, activityBand: 'high', deadTape: false });
+});
+
+test('entryQuality: unstamped fields stay null and never make a band (never guessed)', () => {
+  const blank = { volM5: null, buysM5: null, sellsM5: null, chgH1: null, activityBand: null, deadTape: false };
+  assert.deepEqual(entryQualityStamp({}), blank);
+  assert.deepEqual(entryQualityStamp({ volM5: null, buysM5: undefined, sellsM5: NaN, chgH1: 'hot' }), blank);
+  assert.deepEqual(entryQualityStamp(null), blank);
+  assert.deepEqual(entryQualityStamp(undefined), blank);
+  assert.deepEqual(entryQualityStamp('junk'), blank);
+  // a band needs volM5 alone: the other fields missing does not unmake it
+  assert.deepEqual(entryQualityStamp({ volM5: 4000 }),
+    { volM5: 4000, buysM5: null, sellsM5: null, chgH1: null, activityBand: 'low', deadTape: true });
+});
+
+test('entryQuality: card aggregates count bands + dead tape off the same outcome joins', () => {
+  const outcomes = {
+    q1: { done: true, r15: 0.05, r60: -0.40, maxRet: 0.1, partial: false },
+    q2: { done: true, r15: -0.1, r60: -0.60, maxRet: 0.0, partial: false },
+    q3: { done: true, r15: 0.2, r60: 0.30, maxRet: 0.5, partial: false },
+    q4: { done: true, r15: 0.0, r60: 0.10, maxRet: 0.2, partial: false },
+    q5: { done: false, r15: null, r60: null, maxRet: null, partial: true }, // still tracking: counted, not finalized
+  };
+  const eq = (volM5, band, dead) => ({ volM5, buysM5: 1, sellsM5: 1, chgH1: 0, activityBand: band, deadTape: dead });
+  const recs = [
+    { kind: 'veto', ts: 1, mint: 'A', setup: 'pop', decision: 'skipped', basis: 'signal', rules: ['R4'], signalId: 'q1', entryQuality: eq(4000, 'low', true) },
+    { kind: 'veto', ts: 2, mint: 'B', setup: 'pop', decision: 'taken', basis: 'signal', rules: ['R2'], signalId: 'q2', entryQuality: eq(9000, 'low', true) },
+    { kind: 'veto', ts: 3, mint: 'C', setup: 'pop', decision: 'skipped', basis: 'signal', rules: ['R4'], signalId: 'q3', entryQuality: eq(20000, 'mid', false) },
+    { kind: 'veto', ts: 4, mint: 'D', setup: 'pop', decision: 'skipped', basis: 'signal', rules: ['R5'], signalId: 'q4', entryQuality: eq(90000, 'high', false) },
+    { kind: 'veto', ts: 5, mint: 'E', setup: 'pop', decision: 'skipped', basis: 'signal', rules: ['R4'], signalId: 'q5', entryQuality: eq(60000, 'high', false) },
+    { kind: 'veto', ts: 6, mint: 'F', setup: 'pop', decision: 'skipped', basis: 'signal', rules: ['R4'], signalId: 'q6', entryQuality: eq(null, null, false) }, // stamped, but no volM5 that day
+    { kind: 'veto', ts: 7, mint: 'G', setup: 'pop', decision: 'skipped', basis: 'signal', rules: ['R4'], signalId: 'q7' }, // pre-stamp record: excluded, never back-filled
+  ];
+  const card = buildVetoCard(recs, (id) => outcomes[id] || null);
+  const s = card.entryQuality;
+  assert.equal(s.total, 6);
+  assert.equal(s.noBand, 1);
+  assert.deepEqual(s.bands.low, { n: 2, finalized: 2, medianR60: -0.5, shareR60Positive: 0 });
+  assert.deepEqual(s.bands.mid, { n: 1, finalized: 1, medianR60: 0.3, shareR60Positive: 1 });
+  assert.deepEqual(s.bands.high, { n: 2, finalized: 1, medianR60: 0.1, shareR60Positive: 1 });
+  assert.deepEqual(s.deadTape, { wouldSkip: 2, finalized: 2, medianR60: -0.5, shareR60Positive: 0 });
+  // the veto card itself is untouched by the new summary
+  assert.equal(card.totals.records, 7);
+  assert.equal(card.perRule.R4.wouldVeto, 5);
+  // recent rows carry the stamp through for inspection
+  const byMint = Object.fromEntries(card.recent.map(r => [r.mint, r]));
+  assert.equal(byMint.A.entryQuality.activityBand, 'low');
+  assert.equal(byMint.G.entryQuality, null);
+  // empty card: zeros and nulls, no crash
+  const empty = buildVetoCard([], () => null);
+  assert.deepEqual(empty.entryQuality, {
+    total: 0, noBand: 0,
+    bands: { low: { n: 0, finalized: 0, medianR60: null, shareR60Positive: null }, mid: { n: 0, finalized: 0, medianR60: null, shareR60Positive: null }, high: { n: 0, finalized: 0, medianR60: null, shareR60Positive: null } },
+    deadTape: { wouldSkip: 0, finalized: 0, medianR60: null, shareR60Positive: null },
+  });
+});
+
+test('entryQuality: bot.skip stamps every journaled record — band, dead tape, real decision untouched', () => {
+  const dir = tmp();
+  const bot = rigBot(dir);
+  const gates = { linkedDump: { pass: true, reason: 'no linked stack' } };
+  // busy tape + a veto fire (R4): high band, not dead tape
+  const busy = view({ address: 'BUSY', symbol: 'BUSY', chgM5: 33, chgH1: 5, volM5: 50000, buysM5: 30, sellsM5: 10, createdAt: T0 - 3600e3 });
+  bot.skip(busy, { setup: 'pop', metrics: {} }, ['some gate'], [], gates, true);
+  // dead tape + the same fire: low band, deadTape flagged — and the record
+  // still says the GATE skipped it; the shadow skipped nothing
+  const dead = view({ address: 'DEAD', symbol: 'DEAD', chgM5: 33, chgH1: 5, volM5: 4000, createdAt: T0 - 3600e3 });
+  bot.skip(dead, { setup: 'pop', metrics: {} }, ['some gate'], [], gates, true);
+  // a taken-path evaluation stamps too (the evaluator sees taken alike)
+  bot._noteVetoShadow({ v: view({ address: 'TOOK', symbol: 'TOOK', chgM5: 33, volM5: 20000, createdAt: T0 - 3600e3 }), sig: { setup: 'pop' }, checks: gates, decision: 'taken', reasons: [], signalId: 'took-1' });
+  const recs = readVeto(dir);
+  assert.equal(recs.length, 3);
+  const byMint = Object.fromEntries(recs.map(r => [r.mint, r]));
+  assert.deepEqual(byMint.BUSY.entryQuality, { volM5: 50000, buysM5: 30, sellsM5: 10, chgH1: 5, activityBand: 'high', deadTape: false });
+  assert.equal(byMint.BUSY.decision, 'skipped');
+  assert.deepEqual(byMint.DEAD.entryQuality, { volM5: 4000, buysM5: 30, sellsM5: 10, chgH1: 5, activityBand: 'low', deadTape: true });
+  assert.equal(byMint.DEAD.decision, 'skipped'); // the gate's verdict, not the flag's
+  assert.equal(byMint.TOOK.entryQuality.activityBand, 'mid');
+  assert.equal(byMint.TOOK.decision, 'taken'); // dead-tape logic never reaches a decision
+  const card = bot.vetoCard();
+  assert.equal(card.entryQuality.total, 3);
+  assert.equal(card.entryQuality.bands.low.n, 1);
+  assert.equal(card.entryQuality.bands.mid.n, 1);
+  assert.equal(card.entryQuality.bands.high.n, 1);
+  assert.equal(card.entryQuality.deadTape.wouldSkip, 1);
+});
+
+test('entryQuality: the R1 close-basis record stamps from the position entry snapshot', () => {
+  const dir = tmp();
+  const bot = rigBot(dir);
+  bot.journal.signal({ mint: 'GRIND', symbol: 'GRIND', setup: 'confluence', decision: 'taken', reasons: [], price: 1, mc: 30000 });
+  const pos = { id: 'GRINDX-1', mint: 'GRIND', symbol: 'GRIND', setup: 'confluence', entryTs: T0 + 3000, entryMc: 30000, entryPrice: 1, entry: { chgM5: -45.59, chgH1: -12, volM5: 6000, buysM5: 12, sellsM5: 30 } };
+  bot._noteVetoClose(pos, { fakeAlive: { samples: 9, fake: 5, share: 0.529 }, pnlSol: -0.0712, pnlPct: -71.2, reason: 'death detector' });
+  const recs = readVeto(dir);
+  assert.equal(recs.length, 1);
+  assert.deepEqual(recs[0].entryQuality, { volM5: 6000, buysM5: 12, sellsM5: 30, chgH1: -12, activityBand: 'low', deadTape: true });
+  // an entry snapshot without activity fields stamps nulls, never guesses
+  const pos2 = { id: 'GRINDX-2', mint: 'GRIND', symbol: 'GRIND', setup: 'confluence', entryTs: T0 + 3000, entryMc: 30000, entryPrice: 1, entry: {} };
+  bot._noteVetoClose(pos2, { fakeAlive: { samples: 9, fake: 5, share: 0.529 }, pnlSol: -0.01, reason: 'x' });
+  const recs2 = readVeto(dir);
+  assert.equal(recs2.length, 2);
+  assert.deepEqual(recs2[1].entryQuality, { volM5: null, buysM5: null, sellsM5: null, chgH1: null, activityBand: null, deadTape: false });
 });
 
 test('veto: HTTP surface — /vetoshadow serves the card, empty and populated', async () => {
