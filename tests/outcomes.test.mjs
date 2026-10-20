@@ -133,6 +133,46 @@ test('outcomes: partially-observed expiry names exactly what is missing', () => 
   assert.equal(rec.out.fillAgeMin.r15, null);
 });
 
+test('outcomes: peakMin stamps the age of the LAST max improvement, not the first', () => {
+  let t = T0; const j = new Journal(tmp(), { now: () => t });
+  const id = j.signal({ mint: 'P', symbol: 'P', setup: 'pop', decision: 'skipped', reasons: ['x: y'], price: 1, mc: 1 });
+  t = T0 + 10 * M; j.observe(view({ address: 'P', price: 1.2 })); // first improvement, age 10
+  t = T0 + 25 * M; j.observe(view({ address: 'P', price: 1.1 })); // no improvement
+  t = T0 + 40 * M; j.observe(view({ address: 'P', price: 1.6 })); // LAST improvement, age 40
+  t = T0 + 61 * M; j.observe(view({ address: 'P', price: 0.9 })); // r60 fills -> finalize
+  const rec = j.signals.find(s => s.id === id);
+  assert.equal(rec.out.done, true);
+  assert.ok(Math.abs(rec.out.maxRet - 0.6) < 1e-9, `maxRet ${rec.out.maxRet}`);
+  assert.equal(rec.out.peakMin, 40, 'peakMin is present on the finalized record and names the last improvement');
+});
+
+test('outcomes: peakMin is ~0 when the max never improves past the signal price', () => {
+  let t = T0; const j = new Journal(tmp(), { now: () => t });
+  const id = j.signal({ mint: 'Q', symbol: 'Q', setup: 'pop', decision: 'skipped', reasons: ['x: y'], price: 1, mc: 1 });
+  t = T0 + 6 * M; j.observe(view({ address: 'Q', price: 0.9 }));
+  t = T0 + 16 * M; j.observe(view({ address: 'Q', price: 0.95 })); // still under the signal price
+  t = T0 + 61 * M; j.observe(view({ address: 'Q', price: 0.8 }));
+  const rec = j.signals.find(s => s.id === id);
+  assert.equal(rec.out.done, true);
+  assert.ok(Math.abs(rec.out.maxRet - 0) < 1e-9);
+  assert.equal(rec.out.peakMin, 0); // the max IS the first observation (the signal price)
+});
+
+test('outcomes: peakMin survives a restart through the persisted pending state', () => {
+  const dir = tmp(); let t = T0;
+  let j = new Journal(dir, { now: () => t });
+  const id = j.signal({ mint: 'R', symbol: 'R', setup: 'pop', decision: 'taken', price: 1, mc: 1 });
+  t = T0 + 10 * M; j.observe(view({ address: 'R', price: 1.3 })); // peak at age 10, pre-restart
+  j.savePending();
+  j = new Journal(dir, { now: () => t }); // restart
+  assert.equal(j.pending.get(id).peakAgeMin, 10, 'the stamp must restore, not reset');
+  t = T0 + 30 * M; j.observe(view({ address: 'R', price: 1.2 })); // no improvement after restart
+  t = T0 + 61 * M; j.observe(view({ address: 'R', price: 0.9 }));
+  const rec = j.signals.find(s => s.id === id);
+  assert.equal(rec.out.done, true);
+  assert.equal(rec.out.peakMin, 10);
+});
+
 test('journal: signal records carry the fields block when computed', () => {
   const j = new Journal(tmp(), { now: () => T0 });
   const fields = { holderGrowthPerMin: null, holderGrowthPctPerMin: null, curveFillPctPerMin: null, buyVelPerMin: 10 };

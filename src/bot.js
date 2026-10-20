@@ -42,7 +42,7 @@ import { sampleFakeAlive, fakeAliveStamp, fakeAliveWindow } from './fakeAlive.js
 import { newCensus, censusFold, censusWindow, censusStamp } from './census.js';
 import { evaluatePreEntry, preEntryReason } from './preEntry.js';
 import { evaluateGrind, grindReason, grindKillTally } from './grindJudge.js';
-import { evaluateVetoes, linkedDrainFromChecks } from './vetoLab.js';
+import { evaluateVetoes, linkedDrainFromChecks, r8PostPumpBounce } from './vetoLab.js';
 
 // Scan Ledger: a watch session finalizes at this age even if the coin is
 // still being viewed (a re-view afterward starts a fresh session).
@@ -2000,13 +2000,18 @@ export class Bot {
       }
       const rules = evaluateVetoes(f);
       if (!rules.length) return;
-      this.journal.vetoShadow({
+      const rec = {
         kind: 'veto', id: signalId || `vt-${n}-${String(v.address).slice(0, 6)}`, ts: n, basis: 'signal',
         mint: v.address, symbol: v.symbol || null, setup: f.setup, decision: decision || null,
         reason: reasons && reasons.length ? String(reasons[0]) : null,
         rules, features: f, signalId: signalId || null,
         mc: v.mc ?? null, price: v.price ?? null,
-      });
+      };
+      // R8 post-pump-bounce tag (owner directive #1, 2026-10-19): R8
+      // records only — had this coin already pumped before the flagged
+      // dump? Descriptive like everything in this shadow; read by nobody.
+      if (rules.includes('R8')) rec.postPumpBounce = r8PostPumpBounce(f, rules);
+      this.journal.vetoShadow(rec);
     } catch { /* shadow only — never disturb the signal path */ }
   }
 

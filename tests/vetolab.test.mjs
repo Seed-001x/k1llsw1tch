@@ -14,7 +14,7 @@ import { Journal } from '../src/journal.js';
 import { Bot } from '../src/bot.js';
 import { Executor } from '../src/exec.js';
 import { startServer } from '../src/server.js';
-import { evaluateVetoes, parseLinkedDrainReason, linkedDrainFromChecks, buildVetoCard, VETO_RULES } from '../src/vetoLab.js';
+import { evaluateVetoes, parseLinkedDrainReason, linkedDrainFromChecks, buildVetoCard, r8PostPumpBounce, VETO_RULES } from '../src/vetoLab.js';
 import { tmp, testCfg, view } from './helpers.mjs';
 
 const T0 = 1_000_000_000_000;
@@ -52,6 +52,46 @@ test('veto: each rule fires exactly at its written line, not before', () => {
   assert.deepEqual(evaluateVetoes({ ...base, setup: 'bottom', chgM5: -15 }), []);
   assert.deepEqual(evaluateVetoes({ ...base, setup: 'bottom', chgM5: -15.1 }), ['R8']);
   assert.deepEqual(evaluateVetoes({ ...base, setup: 'confluence', chgM5: -45 }), ['R8']);
+});
+
+test('veto: R8 post-pump-bounce tag — pumped-then-dumping only, missing fields stay false', () => {
+  // the owner's fixture: chgH1 80, chgM5 -20, confluence — pumped, now dumping
+  const pumped = { ...base, setup: 'confluence', chgM5: -20, chgH1: 80, chgH24: 20 };
+  assert.deepEqual(evaluateVetoes(pumped), ['R8']);
+  assert.equal(r8PostPumpBounce(pumped, ['R8']), true);
+  // pumped on the 24h line instead of the 1h line
+  const pumpedDay = { ...base, setup: 'bottom', chgM5: -20, chgH1: 10, chgH24: 150 };
+  assert.deepEqual(evaluateVetoes(pumpedDay), ['R8']);
+  assert.equal(r8PostPumpBounce(pumpedDay, ['R8']), true);
+  // the owner's counter-fixture: chgH1 10, chgH24 20 — a dump with no pump behind it
+  const quiet = { ...base, setup: 'confluence', chgM5: -20, chgH1: 10, chgH24: 20 };
+  assert.deepEqual(evaluateVetoes(quiet), ['R8']);
+  assert.equal(r8PostPumpBounce(quiet, ['R8']), false);
+  // the lines themselves count as pumped (>=, percent units as stamped)
+  assert.equal(r8PostPumpBounce({ ...base, setup: 'bottom', chgM5: -20, chgH1: 50 }, ['R8']), true);
+  assert.equal(r8PostPumpBounce({ ...base, setup: 'bottom', chgM5: -20, chgH24: 100 }, ['R8']), true);
+  assert.equal(r8PostPumpBounce({ ...base, setup: 'bottom', chgM5: -20, chgH1: 49.9, chgH24: 99.9 }, ['R8']), false);
+  // missing features -> false, never guessed
+  assert.equal(r8PostPumpBounce({ ...base, setup: 'confluence', chgM5: -20 }, ['R8']), false);
+  assert.equal(r8PostPumpBounce(null, ['R8']), false);
+  assert.equal(r8PostPumpBounce(pumped, null), false);
+  // no R8 fire -> no tag, even on a coin that pumped hard (pop lane, R5 fires instead)
+  const pumpedNoR8 = { ...base, setup: 'pop', chgM5: -20, chgH1: 300 };
+  assert.deepEqual(evaluateVetoes(pumpedNoR8), ['R5']);
+  assert.equal(r8PostPumpBounce(pumpedNoR8, evaluateVetoes(pumpedNoR8)), false);
+});
+
+test('veto: card counts post-pump-bounce tags on the R8 aggregate only', () => {
+  const recs = [
+    { kind: 'veto', ts: 1, mint: 'A', symbol: 'A', setup: 'confluence', decision: 'skipped', basis: 'signal', rules: ['R8'], signalId: 'x1', postPumpBounce: true },
+    { kind: 'veto', ts: 2, mint: 'B', symbol: 'B', setup: 'bottom', decision: 'skipped', basis: 'signal', rules: ['R8'], signalId: 'x2', postPumpBounce: false },
+    { kind: 'veto', ts: 3, mint: 'C', symbol: 'C', setup: 'confluence', decision: 'skipped', basis: 'signal', rules: ['R8', 'R2'], signalId: 'x3' }, // pre-tag record: no field at all
+    { kind: 'veto', ts: 4, mint: 'D', symbol: 'D', setup: 'pop', decision: 'skipped', basis: 'signal', rules: ['R2'], signalId: 'x4' },
+  ];
+  const card = buildVetoCard(recs, () => null);
+  assert.equal(card.perRule.R8.wouldVeto, 3);
+  assert.equal(card.perRule.R8.postPumpBounce, 1);
+  assert.equal(card.perRule.R2.postPumpBounce, undefined); // the count lives on R8 only
 });
 
 test('veto: Shrub-shaped input fires the same four rules the backtest found', () => {
@@ -171,6 +211,33 @@ test('veto: bot.skip journals a would-veto beside the skipped signal — and onl
   bot.skip(calm, { setup: 'pop', metrics: {} }, ['some gate'], [], { linkedDump: { pass: true, reason: 'no linked stack' } }, true);
   assert.equal(readVeto(dir).length, 1);
   assert.equal(bot.journal.signals.length, 2);
+});
+
+test('veto: bot journals postPumpBounce on R8 records only — true pumped, false quiet, absent otherwise', () => {
+  const dir = tmp();
+  const bot = rigBot(dir);
+  const gates = { linkedDump: { pass: true, reason: 'no linked stack' } };
+  // Gemma/KIM shape: +80% on the hour, now falling hard on the confluence lane
+  const pumped = view({ address: 'GEMMA', symbol: 'GEMMA', chgM5: -22, chgH1: 80, chgH24: 20, createdAt: T0 - 3600e3 });
+  bot.skip(pumped, { setup: 'confluence', metrics: {} }, ['g'], [], gates, true);
+  // same dump, no pump behind it
+  const quiet = view({ address: 'QUIET', symbol: 'QUIET', chgM5: -22, chgH1: 10, chgH24: 20, createdAt: T0 - 3600e3 });
+  bot.skip(quiet, { setup: 'confluence', metrics: {} }, ['g'], [], gates, true);
+  // a non-R8 fire (hot pop) carries no tag field at all
+  const hot = view({ address: 'HOT2', symbol: 'HOT2', chgM5: 33, chgH1: 80, chgH24: 20, createdAt: T0 - 3600e3 });
+  bot.skip(hot, { setup: 'pop', metrics: {} }, ['g'], [], gates, true);
+  const recs = readVeto(dir);
+  assert.equal(recs.length, 3);
+  const byMint = Object.fromEntries(recs.map(r => [r.mint, r]));
+  assert.deepEqual(byMint.GEMMA.rules, ['R8']);
+  assert.equal(byMint.GEMMA.postPumpBounce, true);
+  assert.deepEqual(byMint.QUIET.rules, ['R8']);
+  assert.equal(byMint.QUIET.postPumpBounce, false);
+  assert.ok(!byMint.HOT2.rules.includes('R8'));
+  assert.ok(!('postPumpBounce' in byMint.HOT2), 'non-R8 records carry no tag field');
+  const card = bot.vetoCard();
+  assert.equal(card.perRule.R8.wouldVeto, 2);
+  assert.equal(card.perRule.R8.postPumpBounce, 1);
 });
 
 test('veto: a throwing shadow write can never disturb the signal path', () => {

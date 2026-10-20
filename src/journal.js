@@ -127,7 +127,10 @@ export class Journal {
       const st = sv ? {
         max: Number.isFinite(sv.max) ? sv.max : s.price, min: Number.isFinite(sv.min) ? sv.min : s.price,
         got: sv.got && typeof sv.got === 'object' ? sv.got : {}, at: sv.at && typeof sv.at === 'object' ? sv.at : {}, obs: sv.obs || 0,
-      } : { max: s.price, min: s.price, got: {}, at: {}, obs: 0 };
+        // peakAgeMin rides the same persistence; a pre-peakMin save has no
+        // stamp for its earned max — null (unknown), never a guessed 0.
+        peakAgeMin: Number.isFinite(sv.peakAgeMin) ? sv.peakAgeMin : null,
+      } : { max: s.price, min: s.price, got: {}, at: {}, obs: 0, peakAgeMin: 0 };
       if (n - s.ts <= EXPIRE_MIN * 60000) this.pending.set(s.id, st);
       else { this.pending.set(s.id, st); this.finish(s.id, s, st, true); }
     }
@@ -140,7 +143,7 @@ export class Journal {
   savePending() {
     try {
       const o = {};
-      for (const [id, st] of this.pending) o[id] = { max: st.max, min: st.min, got: st.got, at: st.at || {}, obs: st.obs || 0 };
+      for (const [id, st] of this.pending) o[id] = { max: st.max, min: st.min, got: st.got, at: st.at || {}, obs: st.obs || 0, peakAgeMin: st.peakAgeMin ?? null };
       fs.writeFileSync(this.f.pend, JSON.stringify(o));
       this._pendDirty = false; this._pendSavedAt = this.now();
     } catch { /* disk full etc. — never crash the bot */ }
@@ -496,7 +499,7 @@ export class Journal {
     this.signals.push(rec); this.byId.set(id, rec); rec.out = {};
     if (this.signals.length > KEEP) { const old = this.signals.shift(); this.byId.delete(old.id); }
     this.append(this.f.sig, rec);
-    if (price > 0) { this.pending.set(id, { max: price, min: price, got: {}, at: {}, obs: 0 }); this._pendDirty = true; }
+    if (price > 0) { this.pending.set(id, { max: price, min: price, got: {}, at: {}, obs: 0, peakAgeMin: 0 }); this._pendDirty = true; }
     // Answered re-signals (record-only): a mint the user already answered is
     // signaling again — journal the shadow record (see resignalLab.js).
     try { this._noteResignal(rec); } catch { /* observer only — never disturb the signal path */ }
@@ -525,8 +528,14 @@ export class Journal {
       if (!s) { this.pending.delete(id); continue; }
       if (s.mint !== view.address) continue;
       st.obs = (st.obs || 0) + 1;
-      st.max = Math.max(st.max, view.price); st.min = Math.min(st.min, view.price);
       const ageMin = (n - s.ts) / 60000;
+      // peakMin (owner #6, 2026-10-19): stamp the age of the LAST improvement
+      // of the running max, so the finalized record says WHEN the peak
+      // happened, not just how big it was — same field name and integer-
+      // minute shape as walletWatch.computeOutcome's peakMin. The initial
+      // max (the signal price itself) stamps 0 at registration.
+      if (view.price > st.max) { st.max = view.price; st.peakAgeMin = ageMin; }
+      st.min = Math.min(st.min, view.price);
       for (const cp of CPS) {
         if (ageMin >= cp && st.got[cp] == null) { st.got[cp] = view.price / s.price - 1; (st.at ||= {})[cp] = ageMin; }
       }
@@ -558,7 +567,9 @@ export class Journal {
     const o = {
       id, mint: s.mint, symbol: s.symbol, setup: s.setup, decision: s.decision,
       r5: round(st.got[5]), r15: round(st.got[15]), r60: round(st.got[60]),
-      maxRet: round(st.max / s.price - 1), minRet: round(st.min / s.price - 1), done: true, expired,
+      maxRet: round(st.max / s.price - 1), minRet: round(st.min / s.price - 1),
+      peakMin: Number.isFinite(st.peakAgeMin) ? Math.max(0, Math.round(st.peakAgeMin)) : null,
+      done: true, expired,
       partial: missing.length > 0, missing,
       fillAgeMin: { r5: st.at && st.at[5] != null ? round(st.at[5], 1) : null, r15: st.at && st.at[15] != null ? round(st.at[15], 1) : null, r60: st.at && st.at[60] != null ? round(st.at[60], 1) : null },
       unobserved: !(st.obs > 0),

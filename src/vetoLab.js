@@ -39,6 +39,12 @@
 //     taken trades only — exactly the basis the backtest judged it on
 //     (closes). Signal-time records therefore carry fakeAliveShare: null
 //     and R1 never fires on them; R1 records carry basis: 'close'.
+//
+// R8 post-pump-bounce tag (owner directive #1, 2026-10-19): R8 records
+// carry postPumpBounce — whether the falling knife fell off a coin that
+// had ALREADY pumped before the flagged dump (chgH1 >= +50% or
+// chgH24 >= +100% at flag time, the Gemma/KIM pattern: catching those is
+// a core goal). The tag is descriptive only; it changes no rule's fire.
 import { mean, median, round } from './util.js';
 
 export const VETO_RULES = [
@@ -107,6 +113,20 @@ export function evaluateVetoes(f) {
   return fired;
 }
 
+/** R8 post-pump-bounce tag (owner directive #1, 2026-10-19): true when a
+ *  record that fired R8 did so on a coin that had already pumped before
+ *  this dump — chgH1 >= +50 or chgH24 >= +100, percent units exactly as
+ *  evaluateVetoes reads them (R5's written line is chgH1 > +150 in the
+ *  same units). Missing features -> false, never guessed; no R8 fire ->
+ *  false (the caller stamps the field on R8 records only). Pure, total. */
+export function r8PostPumpBounce(f, rules) {
+  try {
+    if (!f || typeof f !== 'object' || !Array.isArray(rules) || !rules.includes('R8')) return false;
+    const h1 = num(f.chgH1), h24 = num(f.chgH24);
+    return (h1 != null && h1 >= 50) || (h24 != null && h24 >= 100);
+  } catch { return false; }
+}
+
 /** The /vetoshadow scorecard over would-veto records, outcomes joined at
  *  read time via outcomeOf(signalId) -> the signal's tracked outcome (or
  *  null while still tracking / aged out). Per rule: how many signals it
@@ -142,6 +162,9 @@ export function buildVetoCard(records, outcomeOf) {
       realizedPnlSol: pnl.length ? round(pnl.reduce((a, b) => a + b, 0), 4) : null,
       realizedN: pnl.length,
     };
+    // R8 only: how many of its flags carry the post-pump-bounce tag
+    // (records journaled before the tag existed simply don't count).
+    if (rule.id === 'R8') perRule[rule.id].postPumpBounce = mine.filter(x => x.r.postPumpBounce === true).length;
   }
   const sigRecs = recs.filter(r => r.basis !== 'close');
   const closeRecs = recs.filter(r => r.basis === 'close');
@@ -166,6 +189,7 @@ export function buildVetoCard(records, outcomeOf) {
       'live column = would-vetoed signals the bot actually took (real entries the rule would have stopped); shadow column = all would-vetoes',
       'R1 (fakeAlive) is judged at position close — the share is sampled over a hold, so it has no entry-time value; its records are taken closes and carry realized PnL',
       'a rule fires only when every feature it reads was stamped; unstamped features are untestable, never guessed',
+      'R8 records carry postPumpBounce: the coin had already pumped (chgH1 >= +50% or chgH24 >= +100%) before the flagged dump — the Gemma/KIM pattern, counted on the R8 aggregate',
     ],
   };
 }
