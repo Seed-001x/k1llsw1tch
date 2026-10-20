@@ -34,6 +34,42 @@ export function impliedMove({ decisionPriceUsd, solUsd, outAmountRaw, sizeSol, d
   return freshSol / decisionSol - 1;
 }
 
+/**
+ * The pool a Jupiter quote will actually EXECUTE against for `mint`: the
+ * LAST route-plan hop whose output is the mint itself. Earlier hops can be
+ * intermediate tokens (SOL -> USDC -> mint routes exist); only the final
+ * hop's pool holds the mint at the price the fill will print. Returns
+ * { ammKey, label } or null when the quote carries no usable route plan —
+ * the caller's "cannot identify" case (bot.js wrong-pool guard).
+ */
+export function execPoolOf(quote, mint) {
+  const plan = quote && quote.routePlan;
+  if (!Array.isArray(plan) || !plan.length) return null;
+  for (let i = plan.length - 1; i >= 0; i--) {
+    const info = plan[i] && plan[i].swapInfo;
+    if (info && info.outputMint === mint && info.ammKey) return { ammKey: info.ammKey, label: info.label || null };
+  }
+  return null;
+}
+
+/**
+ * Wrong-pool verdict (pure): judge the EXECUTION pool's own numbers
+ * against the same floors the gates judged the graded view by — the live
+ * minMc floor, the gate depth floor (exec liquidity as a share of exec
+ * market cap, gate.js exitDepthCheck's ratio), and a price-agreement
+ * tolerance against the graded view price. A leg whose measurement is
+ * missing (null) never fails: this function is only reached once the
+ * caller HAS priced the execution pool; a pool that cannot be priced at
+ * all is the caller's separate pass-through case.
+ */
+export function wrongPoolVerdict({ execMc, execLiq, execPriceUsd, viewPriceUsd, minMc, minLiqToMc, priceTol }) {
+  const fails = [];
+  if (execMc != null && minMc > 0 && execMc < minMc) fails.push('mc');
+  if (execMc != null && execMc > 0 && execLiq != null && minLiqToMc > 0 && execLiq / execMc < minLiqToMc) fails.push('depth');
+  if (execPriceUsd != null && viewPriceUsd > 0 && priceTol > 0 && Math.abs(execPriceUsd - viewPriceUsd) / viewPriceUsd > priceTol) fails.push('price');
+  return { abort: fails.length > 0, fails };
+}
+
 export class Executor {
   /**
    * @param cfg   config

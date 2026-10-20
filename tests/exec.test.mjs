@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Executor, impliedMove } from '../src/exec.js';
+import { Executor, impliedMove, execPoolOf, wrongPoolVerdict } from '../src/exec.js';
 import { SOL_MINT } from '../src/util.js';
 import { testCfg } from './helpers.mjs';
 
@@ -140,4 +140,40 @@ test('real sell: a balance read that lags the swap still confirms via polling', 
 test('real sell: balance that never moves throws not-confirmed', { skip: !hasSolana }, async () => {
   const { ex } = await realSellRig(() => {});
   await assert.rejects(ex.sell('M', '49142'), /sell not confirmed/);
+});
+
+// ------------------------------------------------------------ wrong-pool guard (owner order 2026-10-19)
+test('execPoolOf: identifies the mint hop pool in single- and multi-hop routes', () => {
+  const one = { routePlan: [{ swapInfo: { ammKey: 'POOL1', label: 'PumpSwap', outputMint: 'MINT' } }] };
+  assert.deepEqual(execPoolOf(one, 'MINT'), { ammKey: 'POOL1', label: 'PumpSwap' });
+  const multi = { routePlan: [
+    { swapInfo: { ammKey: 'USDC_POOL', label: 'Orca', outputMint: 'USDC' } },
+    { swapInfo: { ammKey: 'WRONG_EARLY', label: 'Raydium', outputMint: 'MINT' } },
+    { swapInfo: { ammKey: 'FINAL_POOL', label: 'PumpSwap', outputMint: 'MINT' } },
+  ] };
+  assert.equal(execPoolOf(multi, 'MINT').ammKey, 'FINAL_POOL', 'the last hop into the mint is the execution pool');
+});
+
+test('execPoolOf: unusable route data is null (the guard pass-through case)', () => {
+  assert.equal(execPoolOf(null, 'MINT'), null);
+  assert.equal(execPoolOf({}, 'MINT'), null);
+  assert.equal(execPoolOf({ routePlan: [] }, 'MINT'), null);
+  assert.equal(execPoolOf({ routePlan: [{ swapInfo: { ammKey: 'X', outputMint: 'OTHER' } }] }, 'MINT'), null);
+});
+
+test('wrongPoolVerdict: each abort leg fires on its own measured failure', () => {
+  const base = { execMc: 200_000, execLiq: 60_000, execPriceUsd: 2, viewPriceUsd: 2, minMc: 10_000, minLiqToMc: 0.03, priceTol: 0.20 };
+  assert.deepEqual(wrongPoolVerdict(base), { abort: false, fails: [] });
+  assert.deepEqual(wrongPoolVerdict({ ...base, execMc: 1_946 }).fails, ['mc']);
+  assert.deepEqual(wrongPoolVerdict({ ...base, execMc: 100_000, execLiq: 1_000 }).fails, ['depth']);
+  assert.deepEqual(wrongPoolVerdict({ ...base, execPriceUsd: 3 }).fails, ['price']);
+  const rockstar = wrongPoolVerdict({ execMc: 1_946, execLiq: 1_957, execPriceUsd: 0.0000020, viewPriceUsd: 0.0000669, minMc: 5_000, minLiqToMc: 0.03, priceTol: 0.20 });
+  assert.equal(rockstar.abort, true);
+  assert.deepEqual(rockstar.fails, ['mc', 'price'], 'the Rockstar trap pool fails mc + price; its liq/mc ratio itself was fine');
+});
+
+test('wrongPoolVerdict: missing measurements never fail a leg', () => {
+  const base = { execMc: null, execLiq: null, execPriceUsd: null, viewPriceUsd: 2, minMc: 10_000, minLiqToMc: 0.03, priceTol: 0.20 };
+  assert.deepEqual(wrongPoolVerdict(base), { abort: false, fails: [] });
+  assert.deepEqual(wrongPoolVerdict({ ...base, execMc: 100_000 }), { abort: false, fails: [] }, 'mc present but depth unmeasurable: depth leg stays silent');
 });

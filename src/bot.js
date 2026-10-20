@@ -41,6 +41,8 @@ import { configStamp } from './stamp.js';
 import { sampleFakeAlive, fakeAliveStamp, fakeAliveWindow } from './fakeAlive.js';
 import { newCensus, censusFold, censusWindow, censusStamp } from './census.js';
 import { evaluatePreEntry, preEntryReason } from './preEntry.js';
+import { execPoolOf, wrongPoolVerdict } from './exec.js';
+import { fetchPairView } from './sources.js';
 import { evaluateGrind, grindReason, grindKillTally } from './grindJudge.js';
 import { evaluateVetoes, linkedDrainFromChecks, r8PostPumpBounce, entryQualityStamp } from './vetoLab.js';
 
@@ -64,6 +66,9 @@ export class Bot {
   constructor(cfg, deps) {
     this.cfg = cfg; this.d = deps; this.now = deps.now || Date.now;
     this.exec = deps.exec;
+    // Wrong-pool guard's execution-pool re-price (DexScreener pair read);
+    // unit rigs inject a scripted one, production uses sources.js.
+    this.fetchPair = deps.fetchPair || fetchPairView;
     // Settings tab state (owner order 2026-10-18): the env-boot baseline
     // for every settings-schema key + the live overlay values applied on
     // top of it (index.js computes both; unit rigs leave them empty and
@@ -256,6 +261,11 @@ export class Bot {
     // deferred evaluation; with LIQ_RECHECK=0 the key never exists and
     // records/counters stay exactly as before the fix.
     if (this.cfg.liqRecheck) this.stats.liqRecheck = { queued: 0, recovered: 0, expired: 0, ...(this.stats.liqRecheck || {}) };
+    // WRONG-POOL GUARD tally (owner order 2026-10-19): with the switch on
+    // the counters exist from boot so /state shows them at 0 before the
+    // first judged buy; with WRONG_POOL_GUARD=0 the key never exists and
+    // records/counters stay exactly as before the guard.
+    if (this.cfg.wrongPoolGuard) this.stats.wrongPool = { checked: 0, aborted: 0, unknown: 0, samePool: 0, ...(this.stats.wrongPool || {}) };
     if (!this.stats.baseMode.bySetup) this.stats.baseMode.bySetup = {};
     if (!this.stats.baseMode.pulseSkips) this.stats.baseMode.pulseSkips = { total: 0, bySetup: {} };
     if (loaded) return;
@@ -3505,6 +3515,37 @@ export class Bot {
     }
   }
 
+  /** WRONG-POOL EXECUTION GUARD (owner order 2026-10-19, the Rockstar
+   *  buy): identify the pool the buy quote's route will actually execute
+   *  against and, when it is NOT the pool the gates graded (v.pairAddress),
+   *  re-price THAT pool and judge it by the same floors — live minMc, the
+   *  gate depth floor (minLiqToMc), and price agreement with the graded
+   *  view within cfg.wrongPoolPriceTol. Returns the checks.wrongPool
+   *  stamp; `abort` + `reason` are set only on a measured failure.
+   *  Missing-data posture = the codebase's entry-check norm (fail-open):
+   *  no route plan / unidentifiable pool / failed pair read all pass the
+   *  buy through unchanged, stamped { unknown: true } — the guard acts
+   *  only on a pool it actually measured. Same-pool routes never fetch. */
+  async _wrongPoolCheck(v, quote) {
+    const st = this.stats.wrongPool || (this.stats.wrongPool = { checked: 0, aborted: 0, unknown: 0, samePool: 0 });
+    const pool = execPoolOf(quote, v.address);
+    if (!pool) { st.unknown++; return { unknown: true }; }
+    if (v.pairAddress && pool.ammKey === v.pairAddress) { st.samePool++; return { samePool: true, ammKey: pool.ammKey }; }
+    const ev = await this.fetchPair(pool.ammKey).catch(() => null);
+    if (!ev) { st.unknown++; return { unknown: true, ammKey: pool.ammKey, label: pool.label }; }
+    st.checked++;
+    const verdict = wrongPoolVerdict({ execMc: ev.mc, execLiq: ev.liq, execPriceUsd: ev.price, viewPriceUsd: v.price, minMc: this.cfg.minMc, minLiqToMc: this.cfg.minLiqToMc, priceTol: this.cfg.wrongPoolPriceTol });
+    const stamp = { ammKey: pool.ammKey, label: pool.label, execMc: ev.mc, execLiq: ev.liq, execPrice: ev.price, fails: verdict.fails };
+    if (verdict.abort) {
+      st.aborted++;
+      const usd = (x) => (x != null && Number.isFinite(x) ? fmtUsd(x) : 'unknown');
+      const px = (x) => (x != null && Number.isFinite(x) ? (x >= 0.01 ? x.toFixed(4) : x.toPrecision(3)) : 'unknown');
+      stamp.abort = true;
+      stamp.reason = `wrong-pool abort: exec mc ${usd(ev.mc)} / liq ${usd(ev.liq)} / price ${px(ev.price)} vs view mc ${usd(v.mc)} / ${px(v.price)} (failed: ${verdict.fails.join(', ')})`;
+    }
+    return stamp;
+  }
+
   async onSignal(v, sig) {
     this.stats.signals++;
     const n = this.now();
@@ -3973,6 +4014,17 @@ export class Bot {
     // re-check limits right before spending (state may have changed during the awaits above)
     const gate1 = this.risk.canEnter({ mint: v.address, walletSol: await this.exec.solBalance(), openCount: this.positions.length, sizeSol: size, halted: this.halted(), ...(laneEntry ? { skipMintCooldowns: true } : {}) });
     if (!gate1.ok) { checks.risk = { pass: false, reason: gate1.reason || null }; if (laneEntry) this._laneBlocked(gate1.reason); return this.skip(v, sig, [`risk: ${gate1.reason}`], g.warnings, checks, g.pass); }
+
+    // WRONG-POOL EXECUTION GUARD (owner order 2026-10-19, the Rockstar
+    // buy): every floor above graded the VIEW's pool — this is the last
+    // step before the swap, and the first one that prices the pool the
+    // route will actually execute against. An abort journals through the
+    // same skip path as every other pipeline abort.
+    if (this.cfg.wrongPoolGuard) {
+      const wp = await this._wrongPoolCheck(v, rt.buyQuote);
+      checks.wrongPool = wp;
+      if (wp.abort) { console.log(`[wrongpool] skip: ${v.symbol} — ${wp.reason}`); return this.skip(v, sig, [wp.reason], g.warnings, checks, g.pass); }
+    }
 
     let fill;
     try { fill = await this.exec.buy(v.address, size, rt.buyQuote); }

@@ -97,6 +97,21 @@ export async function fetchViews(mints) {
   return best;
 }
 
+/** The view of ONE pair by address — the wrong-pool guard's re-price of the
+ *  pool a buy will actually execute against (bot.js, owner order
+ *  2026-10-19). Same source family as the graded views (DexScreener), so
+ *  the two prices are commensurate. Fail-open like every read here: any
+ *  error or an unknown pair returns null, and the caller treats null as
+ *  "execution pool cannot be priced" (pass-through, stamped unknown). */
+export async function fetchPairView(pairAddress) {
+  if (!pairAddress) return null;
+  try {
+    const j = await fetchJson(`${DS}/latest/dex/pairs/solana/${pairAddress}`);
+    const pair = j && Array.isArray(j.pairs) ? j.pairs[0] : null;
+    return pair ? viewOf(pair) : null;
+  } catch { return null; }
+}
+
 let solCache = { ts: 0, price: 150 };
 export async function fetchSolUsd(now = Date.now()) {
   if (now - solCache.ts < 60000) return solCache.price;

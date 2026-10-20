@@ -506,6 +506,9 @@ export function loadConfig(env = process.env) {
     topGuardHighMaxAgeSec: num(env, 'TOP_GUARD_HIGH_MAX_AGE_SEC', 300), // ...and the high is no older than this (a held high ages out)
     topGuardLookbackMin: num(env, 'TOP_GUARD_LOOKBACK_MIN', 30), // trailing minutes of samples the high is read from
     minQuoteLiqUsd: num(env, 'MIN_QUOTE_LIQ_USD', 1200),
+    // WRONG-POOL EXECUTION GUARD (owner order 2026-10-19, the Rockstar buy): the gates grade the best-liquidity VIEW of a mint, but Jupiter can route the swap into a SECOND pool for the same mint — Rockstar was graded at mc $66,947 / price $0.0000669 and filled at $0.0000020 in a twin pool (mc $1,946, liq $1,957) that no floor ever saw. Immediately before the swap, Bot re-prices the EXECUTION pool from the buy quote's route plan and aborts (skip-journaled) if its mc is under minMc, its liquidity is under the gate depth floor (minLiqToMc, gate.js exitDepthCheck), or its price differs from the graded view by more than WRONG_POOL_PRICE_TOL. MISSING-DATA POSTURE = the codebase's entry-check norm (impliedMove falls open on null, fastBond unknown passes, census thin passes): if the execution pool cannot be identified from the quote or cannot be priced, the buy proceeds exactly as before and the signal is stamped wrongPool.unknown — the guard only ever acts on a pool it actually measured. WRONG_POOL_GUARD=0 is the kill switch (no check, no stamp, no tally — records exactly as before).
+    wrongPoolGuard: env.WRONG_POOL_GUARD !== '0',
+    wrongPoolPriceTol: num(env, 'WRONG_POOL_PRICE_TOL', 0.20),
     ladderMinN: num(env, 'LADDER_MIN_N', 15), ladderMaxRatio: num(env, 'LADDER_MAX_RATIO', 1.6),
     revivalDeadDrop: num(env, 'REVIVAL_DEAD_DROP', 50), revivalBounce: num(env, 'REVIVAL_BOUNCE', 50),
     revivalStrong: num(env, 'REVIVAL_STRONG', 80), revivalSellRatio: num(env, 'REVIVAL_SELL_RATIO', 1.25),
