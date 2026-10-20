@@ -22,9 +22,17 @@ import path from 'node:path';
 // apply step converts. group drives the tab's sections.
 export const SETTINGS_SCHEMA = [
   // Shape — how the bot trades
-  { key: 'maxPositions', label: 'Slots', group: 'Shape', type: 'int', min: 1, max: 6, hint: 'concurrent positions' },
+  { key: 'maxPositions', label: 'Open positions', group: 'Shape', type: 'int', min: 1, max: 10, hint: 'concurrent positions' },
   { key: 'tradeSol', label: 'Slot 1 size (SOL)', group: 'Shape', type: 'num', min: 0.005, max: 1 },
   { key: 'slot2Sol', label: 'Slot 2 size (SOL)', group: 'Shape', type: 'num', min: 0, max: 1, hint: '0 = same as slot 1' },
+  { key: 'slot3Sol', label: 'Slot 3 size (SOL)', group: 'Shape', type: 'num', min: 0, max: 1, hint: '0 = same as slot 1' },
+  { key: 'slot4Sol', label: 'Slot 4 size (SOL)', group: 'Shape', type: 'num', min: 0, max: 1, hint: '0 = same as slot 1' },
+  { key: 'slot5Sol', label: 'Slot 5 size (SOL)', group: 'Shape', type: 'num', min: 0, max: 1, hint: '0 = same as slot 1' },
+  { key: 'slot6Sol', label: 'Slot 6 size (SOL)', group: 'Shape', type: 'num', min: 0, max: 1, hint: '0 = same as slot 1' },
+  { key: 'slot7Sol', label: 'Slot 7 size (SOL)', group: 'Shape', type: 'num', min: 0, max: 1, hint: '0 = same as slot 1' },
+  { key: 'slot8Sol', label: 'Slot 8 size (SOL)', group: 'Shape', type: 'num', min: 0, max: 1, hint: '0 = same as slot 1' },
+  { key: 'slot9Sol', label: 'Slot 9 size (SOL)', group: 'Shape', type: 'num', min: 0, max: 1, hint: '0 = same as slot 1' },
+  { key: 'slot10Sol', label: 'Slot 10 size (SOL)', group: 'Shape', type: 'num', min: 0, max: 1, hint: '0 = same as slot 1' },
   { key: 'flowConfirmSol', label: 'Flow-lane stake (SOL)', group: 'Shape', type: 'num', min: 0.005, max: 0.5 },
   // Safety — the fail-safes
   { key: 'dailyLossSol', label: 'Daily loss cap (SOL)', group: 'Safety', type: 'num', min: 0, max: 1, hint: '0 = off' },

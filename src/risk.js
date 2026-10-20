@@ -205,17 +205,34 @@ export class Risk {
     if (!this.s.closed[mint] || ts > this.s.closed[mint]) { this.s.closed[mint] = ts; this.save(); }
   }
 
+  /** The dial (SOL) assigned to slot `ordinal` (1-based) — the single
+   *  source for which cfg field prices which slot, shared by sizing and
+   *  the journal slot stamp so the two can never disagree: slot 1 →
+   *  tradeSol, slot 2 → slot2Sol, slots 3..10 → slot3Sol..slot10Sol.
+   *  Returns 0 when the slot has no dial of its own (slot 1 always has
+   *  one: tradeSol itself, > 0 by validation). */
+  slotDialSol(ordinal) {
+    if (ordinal <= 1) return this.cfg.tradeSol;
+    if (ordinal === 2) return this.cfg.slot2Sol || 0;
+    return this.cfg[`slot${ordinal}Sol`] || 0;
+  }
+
   /** The base size for an entry opened with `openCount` positions already
-   *  open (owner order 2026-10-17: "open up one more trading slot but
-   *  .025"): slot 1 (nothing open) sizes at tradeSol; an entry taken while
-   *  a position is already open is the second slot and sizes at slot2Sol.
-   *  slot2Sol <= 0 is the kill switch — every slot sizes at tradeSol,
-   *  byte-identical to the pre-slot stack. The count is the caller's live
+   *  open: the entry becomes position #(openCount + 1) — that slot's
+   *  ordinal — and sizes at the slot's own dial when the dial is > 0,
+   *  else at tradeSol ("same as slot 1"). History: slot 2's dial arrived
+   *  first (owner order 2026-10-17: "open up one more trading slot but
+   *  .025"); slots 3..10 gained dials of their own on 2026-10-19.
+   *  slot2Sol <= 0 keeps its exact kill-switch meaning for slot 2 — it
+   *  sizes at tradeSol, byte-identical to the pre-slot stack. The one
+   *  change for slots >= 3: before they had dials they inherited slot 2's
+   *  size (the old two-bucket rule); an unset slot-3+ dial now falls back
+   *  to tradeSol, never to slot 2. The count is the caller's live
    *  positions length — the same count canEnter's cap judges, adopted
    *  positions included (they sit in that list like any other). */
   baseTradeSol(openCount = 0) {
-    if (openCount >= 1 && this.cfg.slot2Sol > 0) return this.cfg.slot2Sol;
-    return this.cfg.tradeSol;
+    const dial = this.slotDialSol(openCount + 1);
+    return dial > 0 ? dial : this.cfg.tradeSol;
   }
 
   /** The size new entries actually use: the slot's base size, halved while the

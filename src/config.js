@@ -19,6 +19,19 @@ export function loadConfig(env = process.env) {
     tradeSol: num(env, 'TRADE_SOL', 0.05),
     maxPositions: num(env, 'MAX_POSITIONS', 5),
     slot2Sol: num(env, 'SLOT2_SOL', 0.025),             // size for an entry opened while a position is already open (owner order 2026-10-17: "open up one more trading slot but .025" — slot 1 keeps tradeSol, the second concurrent slot trades this); 0 = off (uniform sizing, the pre-slot stack)
+    // Per-slot sizes for slots 3..10 (owner order 2026-10-19: the shape is
+    // just "how many open positions" 1-10 plus a size field per slot). A
+    // slot's dial > 0 prices that slot; 0 = no dial of its own — the entry
+    // sizes at tradeSol ("same as slot 1", the convention slot 2's hint
+    // already states). Resolution lives in risk.js (slotDialSol/baseTradeSol).
+    slot3Sol: num(env, 'SLOT3_SOL', 0),
+    slot4Sol: num(env, 'SLOT4_SOL', 0),
+    slot5Sol: num(env, 'SLOT5_SOL', 0),
+    slot6Sol: num(env, 'SLOT6_SOL', 0),
+    slot7Sol: num(env, 'SLOT7_SOL', 0),
+    slot8Sol: num(env, 'SLOT8_SOL', 0),
+    slot9Sol: num(env, 'SLOT9_SOL', 0),
+    slot10Sol: num(env, 'SLOT10_SOL', 0),
     dailyLossSol: num(env, 'DAILY_LOSS_SOL', 0),        // realized loss in a UTC day that halts new entries; 0 = disabled
     haltAfterCloses: num(env, 'HALT_AFTER_CLOSES', 0),  // one-shot: halt new entries after this many more closes; 0 = off
     // Risk brake (user 2026-10-15, his rule: "after the next 3 L trade half... if 1 trade
@@ -833,6 +846,7 @@ export function validateConfig(cfg) {
   if (cfg.maxPositions < 1 || cfg.maxPositions > 10) errs.push('MAX_POSITIONS must be 1..10');
   if (cfg.archiveHotDays < 1) errs.push('ARCHIVE_HOT_DAYS must be >= 1');
   if (cfg.slot2Sol < 0) errs.push('SLOT2_SOL must be >= 0 (0 = off)');
+  for (let n = 3; n <= 10; n++) if (cfg[`slot${n}Sol`] < 0) errs.push(`SLOT${n}_SOL must be >= 0 (0 = same as slot 1)`);
   if (cfg.dailyLossSol < 0) errs.push('DAILY_LOSS_SOL must be >= 0 (0 = disabled)');
   if (cfg.haltAfterCloses < 0) errs.push('HALT_AFTER_CLOSES must be >= 0');
   if (cfg.lossHalveN < 0) errs.push('LOSS_HALVE_N must be >= 0');
