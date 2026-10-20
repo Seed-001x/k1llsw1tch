@@ -169,3 +169,55 @@ test('preentry pipeline: PREENTRY_CENSUS_VETO=0 stamps the would-veto and still 
   assert.equal(calls[0].sig.metrics.preEntry.wouldVeto, 'absorption');
   assert.equal(bot.stats.preEntry.vetoed || 0, 0);
 });
+
+// ------------------------------------------------------------ one-sided (owner order 2026-10-19, the Rockstar tape)
+test('preentry evaluator: one-sided by ratio — sells >= 10x buys vetoes even with many unique buyers', () => {
+  const r = evaluatePreEntry({ win: { buys: 5, sells: 60, uniqBuyers: 20, uniqSellers: 40, newBuyers: 20, wash: 0, tradesTotal: 65 }, startPrice: 100, minPrice: 99, endPrice: 100, cfg: CFG });
+  assert.equal(r.veto, true);
+  assert.equal(r.why, 'one-sided');
+  assert.equal(r.read.sellBuyRatio, 12);
+});
+
+test('preentry evaluator: one-sided by single buyer — uniqBuyers=1 vetoes a balanced-count tape', () => {
+  const r = evaluatePreEntry({ win: { buys: 8, sells: 6, uniqBuyers: 1, uniqSellers: 5, newBuyers: 1, wash: 0, tradesTotal: 14 }, startPrice: 100, minPrice: 99, endPrice: 100, cfg: CFG });
+  assert.equal(r.veto, true);
+  assert.equal(r.why, 'one-sided');
+});
+
+test('preentry evaluator: the Rockstar census shape (1 buy / 899 sells / 1 unique buyer) vetoes one-sided', () => {
+  const r = evaluatePreEntry({ win: { buys: 1, sells: 899, uniqBuyers: 1, uniqSellers: 500, newBuyers: 1, wash: 0, tradesTotal: 1724 }, startPrice: 100, minPrice: 3, endPrice: 4, cfg: CFG });
+  assert.equal(r.veto, true);
+  assert.equal(r.why, 'one-sided', 'not absorption (buys do not dominate) and not manufactured (wash share 0)');
+});
+
+test('preentry evaluator: a heavy but two-sided tape stays clean (9:1 sells, many buyers)', () => {
+  const r = evaluatePreEntry({ win: { buys: 5, sells: 45, uniqBuyers: 20, uniqSellers: 30, newBuyers: 20, wash: 0, tradesTotal: 50 }, startPrice: 100, minPrice: 90, endPrice: 92, cfg: CFG });
+  assert.equal(r.veto, false);
+  assert.equal(r.why, 'clean');
+});
+
+test('preentry evaluator: one-sided reason string names the signature and the numbers', () => {
+  const s = preEntryReason({ why: 'one-sided', read: { buys: 5, sells: 60, trades: 65, uniqBuyers: 20, washShare: 0, dropPct: 1 } });
+  assert.ok(s.startsWith('preentry-veto: one-sided'));
+  assert.ok(s.includes('60 sells vs 5 buys'));
+  assert.ok(s.includes('20 unique buyers'));
+});
+
+test('preentry pipeline: Rockstar-shaped tape (one buyer wallet, a wall of distinct sellers) vetoes — skipped signal journaled', async () => {
+  const { bot, clock, views, calls } = preRig();
+  bot._evalBottom(BMARK);
+  await flush();
+  // 2 buys, both from ONE wallet; 30 sells from 30 distinct wallets; price flat.
+  bot._censusOnTrade('MINTB', { trader: 'lone-buyer', side: 'buy', tokens: 1000, ts: bot.now() });
+  bot._censusOnTrade('MINTB', { trader: 'lone-buyer', side: 'buy', tokens: 1000, ts: bot.now() });
+  feed(bot, 'MINTB', 'sell', 30, 'seller');
+  views.set('MINTB', view({ address: 'MINTB', symbol: 'BOTM', price: 100 }));
+  clock.t += 200_000;
+  await bot._preEntryTick(clock.t);
+  await flush();
+  assert.equal(calls.length, 0, 'no buy may route');
+  assert.equal(bot.stats.preEntry.vetoed, 1);
+  const rec = bot.journal.signals.at(-1);
+  assert.equal(rec.decision, 'skipped');
+  assert.ok(rec.reasons.some(r => r.startsWith('preentry-veto: one-sided')), JSON.stringify(rec.reasons));
+});

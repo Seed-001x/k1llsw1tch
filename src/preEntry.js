@@ -2,7 +2,7 @@
 // before a QUALIFIED bottom mark routes a live buy, the mint gets a short
 // wallet-census watch (PREENTRY_WINDOW_SEC). The census that used to only
 // witness positions now also guards the door it was built beside — but only
-// against CLEAR puppet tapes. Two signatures veto, either suffices:
+// against CLEAR puppet tapes. Three signatures veto, any suffices:
 //
 //   absorption   — buy COUNTS dominate the window (buys >= sells) while the
 //                  price falls >= PREENTRY_ABSORB_DROP_PCT from the watch
@@ -13,6 +13,15 @@
 //                  (uniqBuyers <= PREENTRY_MAX_UNIQ over >=
 //                  PREENTRY_NARROW_MIN_TRADES trades) with a high wash
 //                  share (the same wallets on both sides).
+//   one-sided    — the mirror image the first two cannot see (owner order
+//                  2026-10-19, the Rockstar tape): a one-way exit stampede —
+//                  sells >= PREENTRY_ONESIDED_RATIO x buys — or a tape
+//                  whose entire buy side is a single wallet
+//                  (uniqBuyers <= PREENTRY_ONESIDED_MAX_UNIQ). Rockstar's
+//                  census read 1 buy / 899 sells / 1 unique buyer and came
+//                  back "clean" because both older signatures only cover
+//                  buyer-side fakery; a bottom entry into a one-sided
+//                  tape is buying the exit liquidity.
 //
 // Everything else passes, and thin data passes by design (fail-open): the
 // veto exists for unmistakable cases only. The pure evaluator lives here;
@@ -27,7 +36,7 @@
  *   cfg: the preEntry* knobs
  * Returns { veto, why, read } — `read` is the compact stamp that rides the
  * signal either way; `why` names the outcome ('absorption' /
- * 'manufactured' / 'thin' / 'clean').
+ * 'manufactured' / 'one-sided' / 'thin' / 'clean').
  */
 export function evaluatePreEntry({ win, startPrice, minPrice, endPrice, cfg }) {
   const trades = win ? (win.tradesTotal ?? (win.buys + win.sells)) : 0;
@@ -42,12 +51,16 @@ export function evaluatePreEntry({ win, startPrice, minPrice, endPrice, cfg }) {
   const read = {
     trades, buys, sells, uniqBuyers, newBuyers, wash,
     washShare: +washShare.toFixed(2),
+    sellBuyRatio: buys > 0 ? +(sells / buys).toFixed(2) : null,
     dropPct: +dropPct.toFixed(1), endDropPct: +endDropPct.toFixed(1),
   };
   if (!win || trades < cfg.preEntryMinTrades) return { veto: false, why: 'thin', read };
   if (dropPct >= cfg.preEntryAbsorbDropPct && buys >= sells) return { veto: true, why: 'absorption', read };
   if (uniqBuyers <= cfg.preEntryMaxUniqBuyers && trades >= cfg.preEntryNarrowMinTrades && washShare >= cfg.preEntryWashShare) {
     return { veto: true, why: 'manufactured', read };
+  }
+  if (sells >= (cfg.preEntryOneSidedRatio ?? 10) * buys || uniqBuyers <= (cfg.preEntryOneSidedMaxUniq ?? 1)) {
+    return { veto: true, why: 'one-sided', read };
   }
   return { veto: false, why: 'clean', read };
 }
@@ -56,6 +69,9 @@ export function evaluatePreEntry({ win, startPrice, minPrice, endPrice, cfg }) {
 export function preEntryReason({ why, read }) {
   if (why === 'absorption') {
     return `preentry-veto: absorption — ${read.buys} buys vs ${read.sells} sells while price fell ${read.dropPct}% in the pre-entry watch (bot-driven tape)`;
+  }
+  if (why === 'one-sided') {
+    return `preentry-veto: one-sided — ${read.sells} sells vs ${read.buys} buys, ${read.uniqBuyers} unique buyers in the pre-entry watch (one-sided tape)`;
   }
   return `preentry-veto: manufactured — ${read.trades} trades from ${read.uniqBuyers} unique buyers, wash share ${read.washShare} (bot-driven tape)`;
 }

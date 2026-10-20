@@ -691,7 +691,7 @@ export function loadConfig(env = process.env) {
     grindKillN: num(env, 'GRIND_KILL_N', 10),
     grindKillWrong: num(env, 'GRIND_KILL_WRONG', 6),
     grindWrongPeakPct: num(env, 'GRIND_WRONG_PEAK_PCT', 25),
-    // PRE-ENTRY CENSUS (owner order 2026-10-18, "it should work both ways"): a QUALIFIED bottom mark's live buy first takes a short wallet-census watch; a CLEAR puppet tape (absorption / manufactured — see src/preEntry.js) vetoes the entry live. Fail-open on thin data or any watcher error; the veto never widens beyond the two named signatures.
+    // PRE-ENTRY CENSUS (owner order 2026-10-18, "it should work both ways"): a QUALIFIED bottom mark's live buy first takes a short wallet-census watch; a CLEAR puppet tape (absorption / manufactured / one-sided — see src/preEntry.js) vetoes the entry live. Fail-open on thin data or any watcher error; the veto never widens beyond the three named signatures.
     preEntryCensus: env.PREENTRY_CENSUS !== '0',
     preEntryVeto: env.PREENTRY_CENSUS_VETO !== '0',   // 0 = watch + stamp only (would-veto recorded, buy proceeds)
     preEntryWindowSec: num(env, 'PREENTRY_WINDOW_SEC', 180),
@@ -700,6 +700,9 @@ export function loadConfig(env = process.env) {
     preEntryMaxUniqBuyers: num(env, 'PREENTRY_MAX_UNIQ', 4),
     preEntryNarrowMinTrades: num(env, 'PREENTRY_NARROW_MIN_TRADES', 25),
     preEntryWashShare: num(env, 'PREENTRY_WASH_SHARE', 0.30),
+    // One-sided tape veto (owner order 2026-10-19, the Rockstar census gap): sells >= RATIO x buys in the watch, OR the whole buy side is at most MAX_UNIQ wallets — a one-way exit stampede / single-buyer tape the buyer-side signatures cannot see.
+    preEntryOneSidedRatio: num(env, 'PREENTRY_ONESIDED_RATIO', 10),
+    preEntryOneSidedMaxUniq: num(env, 'PREENTRY_ONESIDED_MAX_UNIQ', 1),
     dipStopPct: num(env, 'DIP_STOP_PCT', 0.05),           // sell if PRICE drops this far below entry (0 = off)
     stallSec: num(env, 'STALL_SEC', 60),                  // entry stall: sell if price never breaks out within this many seconds of entry (0 = off)
     stallBandPct: num(env, 'STALL_BAND_PCT', 0.05),       // entry range half-width: at stallSec the price must be OUTSIDE entry ± this or the position sells (user 2026-10-13 endpoint version)
