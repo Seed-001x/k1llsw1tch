@@ -248,6 +248,9 @@ export class Bot {
     // build carries only {armed, fired}, so normalize the shape here or the
     // first wave event would increment an undefined field into NaN.
     if (this.stats.deadflow) { this.stats.deadflow.waves = this.stats.deadflow.waves || 0; this.stats.deadflow.floor = this.stats.deadflow.floor || 0; }
+    // DEAD-FLOW LOSS EXIT (owner order 2026-10-20): the fire tally exists
+    // from boot so /state reads 0 before the first fire, not undefined.
+    this.stats.deadFlowExits = this.stats.deadFlowExits || 0;
     // BASE MODE (owner order 2026-10-16): the tally exists from boot so
     // /state shows the strategy's shape even before the first enrollment.
     this.stats.baseMode = { enrolled: 0, bySetup: {}, dipWatches: 0, dipEntries: 0, structureStops: 0, pulseSkips: { total: 0, bySetup: {} }, rangeUnenrolled: 0, trendBypass: 0, rangeSkips: { total: 0, byKind: {} }, ...(this.stats.baseMode || {}) };
@@ -4514,6 +4517,14 @@ const takenSigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setu
         else if (ev.type === 'fired') this.stats.stallExit.fires++;
       }
     }
+    // DEAD-FLOW LOSS EXIT (owner order 2026-10-20 00:32 EDT): fire tally.
+    // The fire itself rides the normal sell path: the close journals the
+    // decision's "dead-flow exit (...)" reason.
+    if (decision.deadLossEvents && decision.deadLossEvents.length) {
+      for (const ev of decision.deadLossEvents) {
+        if (ev.type === 'fired') { this.stats.deadFlowExits = (this.stats.deadFlowExits || 0) + 1; console.log(`[deadflow-exit] ${pos.symbol}: armed under the −${Math.round((this.cfg.deadFlowPct ?? 0.10) * 100)}% line and the tape is dead over ${this.cfg.deadFlowWindowSec}s — selling in full`); }
+      }
+    }
     // PROTECT switch (user 2026-10-15): count the checks where protection suppressed
     // a stop-loss/ratchet exit on this position (first suppressed kind per check,
     // as reported by exits.js on the decision).
@@ -4805,7 +4816,7 @@ const takenSigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setu
       modeWarning: this.cfg.modeWarning,
       halted: this.halted(),
       risk: this.risk.snapshot(),
-      limits: { tradeSol: this.risk.effectiveTradeSol(), maxPositions: this.cfg.maxPositions, dailyLossSol: this.cfg.dailyLossSol, maxTradesPerHour: this.cfg.maxTradesPerHour, tp1Pct: this.cfg.tp1Pct, tp1Frac: this.cfg.tp1Frac },
+      limits: { tradeSol: this.risk.effectiveTradeSol(), maxPositions: this.cfg.maxPositions, dailyLossSol: this.cfg.dailyLossSol, maxTradesPerHour: this.cfg.maxTradesPerHour, tp1Pct: this.cfg.tp1Pct, tp1Frac: this.cfg.tp1Frac, entryClip: this.cfg.entryClip, deadFlowExit: this.cfg.deadFlowExit, deadFlowPct: this.cfg.deadFlowPct, deadFlowWindowSec: this.cfg.deadFlowWindowSec },
       flowConfirm: this._flowConfirmState(),
       grindJudge: this._grindJudgeState(),
       census: this.stats.census || null,

@@ -111,6 +111,21 @@
 // ~3× what the trail banked, and the downside he actually risks is a
 // 5%-of-original stub riding back to +10% over entry. Mode off restores
 // the trail exactly as it was, confirm timer included.
+//
+// DEAD-FLOW LOSS EXIT (owner order 2026-10-20 00:32 EDT, "remove the 3m
+// thing no SL at all only a dead flow once it's under -10%"): the entry
+// clip (5a) is switched off by the owner (ENTRY_CLIP=0 — the section
+// stays in code, fully gated on its switch) and there is NO price
+// stop-loss anywhere in the stack. The one loss-side exit is new
+// section 5c: a PRE-TP1 position at/below −DEAD_FLOW_PCT whose tape
+// reads dead over the trailing DEAD_FLOW_WINDOW_SEC — the moonbag
+// dead-flow test's own terms (buy count barely rises, no new peak) —
+// sells in full. Price arms it; only dead tape fires it; missing tape
+// holds. His earlier −15%/timer sketch from the same evening is
+// superseded unbuilt. Untouched by the order: the TP ladder, the
+// moonbag stack (3c–3c3, its dead flow included), liquidity death (1),
+// the stall exit (5) and the bot-side death detector / no-quote
+// failsafe.
 const STRIP = {
   stopFamily: true,
   stallProbation: true,
@@ -251,6 +266,12 @@ export function evaluateExit(pos, mark, cfg, now) {
   // ENTRY_CLIP off) drops any carried pending, so no stale stamp can
   // execute in a stage the rule does not own.
   if (!(cfg.entryClip > 0) || pos.tp1Done || pos.tp2Done) clipPending = null;
+  // Dead-flow loss-exit events (owner order 2026-10-20 00:32 EDT,
+  // section 5c): the fire is judged fresh from the recorded tape on
+  // every check — the trailing window is the confirmation — so the
+  // rule carries NO persisted state: no pending, no arming flag. The
+  // events array is its only bookkeeping (the caller tallies fires).
+  const deadLossEvents = [];
   // Staged moonbag dead-flow state (user order 2026-10-16 ~20:15 EDT,
   // sections 3c2/3c3): bagDeadWaves counts the dead-flow waves that have
   // sold on this bag (0, 1, 2 — a count of SOLD waves, never decremented);
@@ -375,7 +396,7 @@ export function evaluateExit(pos, mark, cfg, now) {
   // section 4b), so no clock that matured during the takeover can fire. Takeover
   // supersedes protect: with both flags set, this return wins and nothing judges.
   const taken = !!pos.takenOver;
-  const out = (fraction, reason) => ({ fraction, reason, newPeak: peakRatio, newPeakMove: peakMove, ratio, stallSince: null, stopArmedTs, floorChecks, floorSince, probationSince, tp1Arm, moveHist, exitPending, exitConfirmEvents, protectedBlock, killZone, postTp1PeakMove, killzoneEvents, deadflowArmed, deadflowEvents, stallPending, stallEvents, clipPending, bagDeadWaves, bagDeadHot, bagTrailSince, bagFloorSince, bagTp2Ratio, bagTrimDone });
+  const out = (fraction, reason) => ({ fraction, reason, newPeak: peakRatio, newPeakMove: peakMove, ratio, stallSince: null, stopArmedTs, floorChecks, floorSince, probationSince, tp1Arm, moveHist, exitPending, exitConfirmEvents, protectedBlock, killZone, postTp1PeakMove, killzoneEvents, deadflowArmed, deadflowEvents, stallPending, stallEvents, clipPending, deadLossEvents, bagDeadWaves, bagDeadHot, bagTrailSince, bagFloorSince, bagTp2Ratio, bagTrimDone });
   if (taken) {
     stopArmedTs = null; floorChecks = 0; floorSince = null; probationSince = null; tp1Arm = null; stallPending = null; clipPending = null; bagDeadHot = false; bagTrailSince = null; bagFloorSince = null;
     if (exitPending != null) exitPending = {};
@@ -1027,6 +1048,59 @@ export function evaluateExit(pos, mark, cfg, now) {
       }
     } else if (clipPending != null) {
       clipPending = null; // back above the line inside the window: the pending dies
+    }
+  }
+
+  // 5c. DEAD-FLOW EXIT (owner order 2026-10-20 00:32 EDT — "no SL at
+  //     all, only a dead flow once it's under -10%"): the stack's ONLY
+  //     loss-side exit, and price alone still cannot fire it. The rule:
+  //       ARM — the position is PRE-TP1 and its round-trip move sits
+  //         at/below −DEAD_FLOW_PCT (judged on `move`, like the clip
+  //         beside it: what the price did, not sunk fees). Above the
+  //         line the rule does not exist for the position.
+  //       FIRE — while armed, the tape over the trailing
+  //         DEAD_FLOW_WINDOW_SEC reads DEAD under the moonbag dead-flow
+  //         test's own terms (3c2), judged on the position's OWN
+  //         recorded series: (1) the trailing-5m buy count flowHist
+  //         records every check rises by at most deadflowMaxBuyDelta
+  //         across the window; (2) no new peak inside the window — the
+  //         best `move` printed since it opened does not exceed the
+  //         peak as of its start (moveHist). Both terms met sells in
+  //         full. The window IS the confirmation — a full window of
+  //         dead tape, not one bad tick — so the fire is instant, no
+  //         pending, exactly like 3c2.
+  //       FAIL-TOWARD-HOLDING (the owner's no-SL intent): the window
+  //         must be fully covered — a flow sample at/just before its
+  //         start, a fresh current sample, buy counts present at both
+  //         ends, move samples on both sides of its start. Missing
+  //         tape NEVER fires: a position with no recorded window (just
+  //         opened, fresh restart, feed gap) simply holds.
+  //     Scope is pre-TP1 only: TP1 banking proves the entry worked and
+  //     hands the position to the middle/moonbag judges — the moonbag
+  //     stage's own dead flow (3c2) is untouched and owns the bag.
+  //     PROTECT does not block it (same posture as the stall exit and
+  //     the clip beside it); TAKEOVER returned long before this
+  //     section. DEAD_FLOW_EXIT=0 (or a 0 window) disables it entire.
+  if (cfg.deadFlowExit > 0 && (cfg.deadFlowWindowSec || 0) > 0 && !pos.tp1Done && !pos.tp2Done && move <= 1 - (cfg.deadFlowPct ?? 0.10)) {
+    const winMs = cfg.deadFlowWindowSec * 1000;
+    const winStart = now - winMs;
+    let fStart = null, fNow = null;
+    for (const s of pos.flowHist || []) {
+      if (!s || s.ts == null) continue;
+      if (s.ts <= winStart && (fStart == null || s.ts > fStart.ts)) fStart = s;
+      if (fNow == null || s.ts > fNow.ts) fNow = s;
+    }
+    let peakAtStart = null, peakInWindow = null;
+    for (const h of moveHist) {
+      if (h.ts <= winStart) peakAtStart = peakAtStart == null ? h.move : Math.max(peakAtStart, h.move);
+      else peakInWindow = peakInWindow == null ? h.move : Math.max(peakInWindow, h.move);
+    }
+    const covered = fStart != null && fNow != null && winStart - fStart.ts <= 12000 && now - fNow.ts <= 12000
+      && fStart.buys != null && fNow.buys != null && peakAtStart != null && peakInWindow != null;
+    const buyDelta = covered ? fNow.buys - fStart.buys : null;
+    if (covered && buyDelta <= cfg.deadflowMaxBuyDelta && peakInWindow <= peakAtStart + 1e-9) {
+      deadLossEvents.push({ type: 'fired', buyDelta });
+      return out(1, `dead-flow exit (${((move - 1) * 100).toFixed(1)}% — under the −${((cfg.deadFlowPct ?? 0.10) * 100).toFixed(0)}% line, ${Math.max(0, buyDelta)} new buys in ${cfg.deadFlowWindowSec}s, no new peak)`);
     }
   }
 

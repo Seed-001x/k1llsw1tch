@@ -647,6 +647,23 @@ export function loadConfig(env = process.env) {
     entryClipSec: num(env, 'ENTRY_CLIP_SEC', 180),        // the "3m timer": the rule does not exist for a younger position
     entryClipPct: num(env, 'ENTRY_CLIP_PCT', 0.07),       // the "−7%": clip line on the round-trip move vs entry
     entryClipConfirmSec: num(env, 'ENTRY_CLIP_CONFIRM_SEC', 60), // owner amendment 2026-10-18 20:28 EDT: the breach must HOLD this long before the clip sells (0 = instant, the original form)
+    // DEAD-FLOW EXIT (owner order 2026-10-20 00:32 EDT, "remove the 3m
+    // thing, no SL at all, only a dead flow once it's under -10%" — the
+    // same order flips ENTRY_CLIP off via env): the ONLY loss-side exit.
+    // It is NOT a stop-loss: price alone can never fire it. A pre-TP1
+    // position whose round-trip move sits at/below −DEAD_FLOW_PCT is
+    // ARMED; while armed, the tape over the trailing DEAD_FLOW_WINDOW_SEC
+    // is judged with the moonbag dead-flow test's own terms (exits.js
+    // 3c2): the recorded buy count rises by at most DEADFLOW_MAX_BUY_DELTA
+    // across the window AND no new peak prints inside it. Armed AND dead
+    // sells in full; the window is the confirmation. Missing tape (fresh
+    // restart, feed gap) never fires — the rule fails toward HOLDING.
+    // TP1 banking removes a position from scope: the middle/moonbag
+    // judges own it from there, the moonbag's own dead flow included.
+    // Exits.js section 5c.
+    deadFlowExit: num(env, 'DEAD_FLOW_EXIT', 1),         // kill switch: 0 = no dead-flow loss exit
+    deadFlowPct: num(env, 'DEAD_FLOW_PCT', 0.10),        // the "−10%": arm line on the round-trip move vs entry
+    deadFlowWindowSec: num(env, 'DEAD_FLOW_WINDOW_SEC', 120), // trailing tape window that must read dead in full (0 = rule off)
     // DEATH DETECTOR (owner design 2026-10-17 ~18:37 EDT, "put it to a test
     // with a .02 buy with our last funds"; combination rule delegated to the
     // agent): NOT a stop-loss — no price floor, no arming on targets, PnL is
@@ -871,6 +888,9 @@ export function validateConfig(cfg) {
   if (cfg.entryClipSec < 0 || cfg.entryClipSec > 3600) errs.push('ENTRY_CLIP_SEC must be between 0 and 3600');
   if (cfg.entryClipPct < 0 || cfg.entryClipPct > 0.9) errs.push('ENTRY_CLIP_PCT must be between 0 and 0.9');
   if (cfg.entryClipConfirmSec < 0 || cfg.entryClipConfirmSec > 3600) errs.push('ENTRY_CLIP_CONFIRM_SEC must be between 0 and 3600');
+  if (cfg.deadFlowExit < 0 || cfg.deadFlowExit > 1) errs.push('DEAD_FLOW_EXIT must be 0 or 1');
+  if (cfg.deadFlowPct < 0 || cfg.deadFlowPct > 0.9) errs.push('DEAD_FLOW_PCT must be between 0 and 0.9');
+  if (cfg.deadFlowWindowSec < 0 || cfg.deadFlowWindowSec > 3600) errs.push('DEAD_FLOW_WINDOW_SEC must be between 0 (off) and 3600');
   if (cfg.stopXcheckPct < 0.05 || cfg.stopXcheckPct > 0.9) errs.push('STOP_XCHECK_PCT must be between 0.05 and 0.9');
   if (cfg.extMaxFromBase < 0 || cfg.extMaxFromBase > 20) errs.push('EXT_MAX_FROM_BASE must be between 0 and 20 (0 = off)');
   if (cfg.paceRelax < 0 || cfg.paceRelax > 1) errs.push('PACE_RELAX must be 0 or 1');
