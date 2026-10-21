@@ -189,7 +189,19 @@ export function curveLifeFromPairs(pairs) {
     else if (ammTs == null || ts < ammTs) ammTs = ts;
   }
   if (curveTs == null || ammTs == null) return null;
-  const lifeSec = Math.floor((ammTs - curveTs) / 1000);
+  const diffMs = ammTs - curveTs;
+  if (diffMs < 0) return null;
+  // Equal stamps are a MEASURED zero, not missing data (owner order
+  // 2026-10-21, the MILK/KIMCHI hole): when a curve is slammed to
+  // graduation inside one timestamp tick, DexScreener stamps the curve
+  // pair and the AMM pair with the SAME pairCreatedAt second. Reading
+  // that as null made fastBond report "lifespan unavailable — not
+  // judged" and wave three same-second bonders through in one day
+  // (MILK + two KIMCHI clones). A measured 0 blocks at the fast-bond
+  // line like any other sub-line life. A positive sub-second gap stays
+  // null: it is indexer granularity noise, not a duration.
+  if (diffMs === 0) return 0;
+  const lifeSec = Math.floor(diffMs / 1000);
   return lifeSec > 0 ? lifeSec : null;
 }
 

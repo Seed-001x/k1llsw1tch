@@ -109,6 +109,18 @@ test('curveLifeFromPairs: graduation stamp minus curve stamp, earliest AMM pair 
   assert.equal(curveLifeFromPairs([{ dexId: 'pumpfun', pairCreatedAt: 1000000 }, { dexId: 'pumpswap', pairCreatedAt: 1000000 + 120000 }]), 120);
 });
 
+test('curveLifeFromPairs: EQUAL stamps are a measured 0 (owner order 2026-10-21, the MILK/KIMCHI hole)', () => {
+  // DexScreener stamps the curve pair and the AMM pair with the same
+  // pairCreatedAt second when a curve is slammed to graduation inside one
+  // timestamp tick. That used to read null ("unavailable — not judged")
+  // and fastBond waved MILK (11:56:27 both stamps) and two KIMCHI clones
+  // (13:14:06 / 13:47:44, both stamps equal) through in one day.
+  const ts = 1792604864000;
+  assert.equal(curveLifeFromPairs([{ dexId: 'pumpfun', pairCreatedAt: ts }, { dexId: 'pumpswap', pairCreatedAt: ts }]), 0, 'same-second graduation is a measured 0s life');
+  assert.equal(fastBondVerdict(0, 120).pass, false, 'a measured 0 blocks at the 120s line');
+  assert.equal(fastBondVerdict(0, 120).unknown, false, 'a measured 0 is judged, not unknown');
+});
+
 test('curveLifeFromPairs: every unmeasurable shape reads null (unknown), never a number', () => {
   const curve = { dexId: 'pumpfun', pairCreatedAt: 1792198759000 };
   const swap = { dexId: 'pumpswap', pairCreatedAt: 1792198837000 };
@@ -161,6 +173,18 @@ test('fast bond: FAST_BOND_MAX_SEC moves the line — 78s passes at 60, 59s bloc
   const rec59 = await popFire(r59);
   assert.equal(rec59.decision, 'skipped');
   assert.deepEqual(rec59.reasons, ['curve lifespan 59s < 60s — fast bonder blocked']);
+});
+
+test('fast bond: a measured 0s curve life (same-second bonder) is BLOCKED on the pop path', async () => {
+  const rig = pipelineRig({ curveLife: 0 });
+  const rec = await popFire(rig);
+  assert.equal(rec.decision, 'skipped', JSON.stringify(rec.reasons));
+  assert.deepEqual(rec.reasons, ['curve lifespan 0s < 120s — fast bonder blocked']);
+  assert.equal(rec.gates.fastBond.pass, false);
+  assert.equal(rec.gates.fastBond.curveLifeSec, 0);
+  assert.equal(rec.gates.fastBond.unknown, undefined, 'a measured life is judged — the unknown stamp is only set when unmeasured');
+  assert.equal(rig.bot.positions.length, 0);
+  assert.deepEqual(rig.bot.stats.fastBond, { blocked: 1, passed: 0, unknown: 0 });
 });
 
 // ------------------------------------------------------------ pipeline: fail open, always

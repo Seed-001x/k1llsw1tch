@@ -914,7 +914,8 @@ export class Bot {
   // Orphan adoption (user order 2026-10-16): the drop guard keeps the bot
   // from losing a position it still holds; this covers the case where the
   // books lost one anyway. Candidates are journal-driven — a mint whose last
-  // journal event is a close, with the original buy on record — because every
+  // journal event is a close, with the original buy on record (or, since
+  // 2026-10-21, a mint whose last event is an open-unverified buy) — because every
   // bag the bot owns arrived through a journaled buy, and foreign transfers
   // in must never be adopted. A candidate is adopted only when the wallet
   // still holds the mint and its realizable value clears the dust floor;
@@ -928,6 +929,13 @@ export class Bot {
       if (t.type === 'open' && !t.adopted) {
         const e = lastEvent.get(t.mint) || {};
         e.kind = 'open'; e.open = t; lastEvent.set(t.mint, e);
+      } else if (t.type === 'open-unverified') {
+        // LANDED-UNVERIFIED (owner order 2026-10-21): a buy whose swap was
+        // sent but whose confirmation read failed. Until reconcile adopts
+        // the bag or resolves it as never-landed, this record is the ONLY
+        // place the position exists — it must candidate like a close does.
+        const e = lastEvent.get(t.mint) || {};
+        e.kind = 'unverified'; e.open = t; e.close = null; lastEvent.set(t.mint, e);
       } else if (t.type === 'close') {
         const e = lastEvent.get(t.mint) || {};
         e.kind = 'close'; e.close = t; lastEvent.set(t.mint, e);
@@ -936,8 +944,14 @@ export class Bot {
     const openNow = new Set(this.positions.map(p => p.mint));
     const out = [];
     for (const [mint, e] of lastEvent) {
-      if (e.kind !== 'close' || !e.open || !e.close) continue;
       if (openNow.has(mint)) continue;
+      if (e.kind === 'unverified' && e.open) {
+        if (now - (e.open.ts || 0) > lookback) continue;
+        out.push({ mint, open: e.open, close: null, unverified: true });
+        continue;
+      }
+      if (e.kind !== 'close' || !e.open || !e.close) continue;
+      if (e.close.unverifiedResolved) continue; // already closed out as never-landed — never a bag
       if (now - (e.close.ts || 0) > lookback) continue;
       out.push({ mint, open: e.open, close: e.close });
     }
@@ -951,17 +965,33 @@ export class Bot {
     }
   }
 
-  async _tryAdopt({ mint, open, close }, now) {
+  async _tryAdopt({ mint, open, close, unverified }, now) {
     // respect the position cap — a later pass retries when a slot frees
     if (this.positions.length >= (this.cfg.maxPositions || 1)) return false;
     const last = this.adoptScan.get(mint) || 0;
     if (now - last < 300_000) return false; // one balance read per mint per 5 min
     this.adoptScan.set(mint, now);
     const bal = await this.exec.tokenBalance(mint).catch(() => null);
-    if (bal == null || bal === 0n) return false;
-    const entryTokens = Number(open.tokensRaw || close.tokensRaw || 0);
-    if (!(entryTokens > 0)) return false;
-    const remainingFrac = Math.min(1, Number(bal) / entryTokens);
+    if (bal == null) return false;
+    if (bal === 0n) {
+      // LANDED-UNVERIFIED resolution (owner order 2026-10-21): an unverified
+      // buy whose wallet read is a CONFIRMED zero well past the send (15m —
+      // several adopt scans) never landed, or its bag already left through
+      // the owner's own hand (the MILK shape). Close the record out so it
+      // stops candidating; the unverifiedResolved stamp keeps it out of the
+      // orphan path forever. A read ERROR above (bal null) never resolves —
+      // one bad read must not be the whole truth about a position.
+      if (unverified && now - (open.ts || 0) >= 900_000) {
+        this.journal.trade({ type: 'close', unverifiedResolved: true, id: open.id, mint, symbol: open.symbol || mint.slice(0, 6), setup: open.setup || 'pop', pnlSol: 0, ts: now, reason: 'unverified buy resolved: no tokens in wallet 15m after the send — never landed or already exited externally' });
+        console.log(`[adopt] ${open.symbol || mint.slice(0, 6)}: unverified buy resolved as never-landed (no tokens 15m after send, sig ${open.sig || '?'})`);
+      }
+      return false;
+    }
+    const entryTokens = Number(open.tokensRaw || (close && close.tokensRaw) || 0);
+    if (!(entryTokens > 0) && !unverified) return false;
+    // an unverified open has no recorded fill size — the whole bag in the
+    // wallet IS the position (frac 1, basis the full intended spend)
+    const remainingFrac = entryTokens > 0 ? Math.min(1, Number(bal) / entryTokens) : 1;
     if (!(remainingFrac > 0)) return false;
     let valueSol = null;
     try { valueSol = await this.exec.markValue(mint, bal.toString()); } catch { return false; }
@@ -970,26 +1000,26 @@ export class Bot {
     try { const rt = await this.exec.roundTrip(mint, Math.max(0.001, Math.min(valueSol, this.cfg.tradeSol || valueSol))); if (rt && rt.ratio > 0) rtRatio = rt.ratio; } catch { /* keep the estimate */ }
     const basis = (open.entrySol || 0) * remainingFrac;
     const ratio0 = basis > 0 ? (valueSol / basis) / rtRatio : 1;
-    const snap = close.entry || null;
+    const snap = close ? (close.entry || null) : null;
     // banks the original position already made stay banked (journal sells on its id)
     const sells = this.journal.trades.filter(t => t.type === 'sell' && t.id === open.id);
     const pos = {
       id: `${mint.slice(0, 6)}-${now}`, mint, symbol: open.symbol || close.symbol || mint.slice(0, 6), setup: open.setup || close.setup || 'pop',
       entryTs: open.ts || now, entrySol: open.entrySol || 0, tokensRaw: bal.toString(), entryTokensRaw: String(open.tokensRaw || bal.toString()), remainingFrac, peakRatio: Math.max(1, ratio0), tp1Done: sells.some(t => (t.reason || '').startsWith('TP1')), tp2Done: sells.some(t => (t.reason || '').startsWith('TP2')), tp1Arm: null, flowHist: [], suspectUnbookedSell: false,
-      entryPrice: snap ? snap.price ?? null : null, entryMc: snap ? snap.mc ?? null : null, realizedSol: 0, simulated: false, sigBuy: open.sig || null, markFails: 0,
-      stamp: this.cfgStamp, gates: { adopted: true }, gatePass: null, decimals: close.decimals ?? null,
-      entryFillSol: open.entryFillSol ?? close.entryFillSol ?? null, solUsdEntry: null, ticks: [],
+      entryPrice: snap ? snap.price ?? null : (open.entryPrice ?? null), entryMc: snap ? snap.mc ?? null : (open.entryMc ?? null), realizedSol: 0, simulated: false, sigBuy: open.sig || null, markFails: 0,
+      stamp: this.cfgStamp, gates: { adopted: true }, gatePass: null, decimals: (close && close.decimals) ?? open.decimals ?? null,
+      entryFillSol: open.entryFillSol ?? (close && close.entryFillSol) ?? null, solUsdEntry: null, ticks: [],
       entryVolH1: snap ? snap.volH1 || 0 : 0,
       entryRoundTrip: rtRatio, peakMove: Math.max(1, ratio0), stopArmedTs: null, floorChecks: 0, floorSince: null, probationSince: null, moveHist: [], exitPending: {}, stallPending: null, clipPending: null, bagDeadWaves: 0, bagDeadHot: false, feesSol: this.cfg.txFeeSol || 0,
       bw: { tracked: null, supply: 0, creator: null, weights: linkedWeights(null), snaps: [], vals: [], lastTs: 0, trimmed: false },
       entry: snap, lastTickTs: 0, lastChainTs: 0, chainDropStrikes: 0,
-      adopted: true, adoptedTs: now, adoptOf: close.id || null, lastValueSol: valueSol,
+      adopted: true, adoptedTs: now, adoptOf: close ? (close.id || null) : (open.id || null), lastValueSol: valueSol,
     };
     this.positions.push(pos);
     this.savePositions();
     this.enteredMints.add(mint); this.saveEnteredMints();
-    this.journal.trade({ type: 'open', adopted: true, id: pos.id, mint, symbol: pos.symbol, setup: pos.setup, entrySol: pos.entrySol, sig: open.sig || null, simulated: false, ts: now, stamp: pos.stamp, tokensRaw: pos.tokensRaw, entryFillSol: pos.entryFillSol, entryFillUsd: null, reason: `adopted orphan bag — closed as "${(close.reason || '').slice(0, 60)}" but ${valueSol.toFixed(4)} SOL of tokens remained in the wallet` });
-    console.log(`[adopt] ${pos.symbol}: picked an orphan bag back up — ${valueSol.toFixed(4)} SOL realizable, ${(remainingFrac * 100).toFixed(0)}% of the original buy, was closed as "${(close.reason || '').slice(0, 50)}"`);
+    this.journal.trade({ type: 'open', adopted: true, id: pos.id, mint, symbol: pos.symbol, setup: pos.setup, entrySol: pos.entrySol, sig: open.sig || null, simulated: false, ts: now, stamp: pos.stamp, tokensRaw: pos.tokensRaw, entryFillSol: pos.entryFillSol, entryFillUsd: null, reason: unverified ? `adopted landed-but-unverified buy (sig ${open.sig || '?'}) — ${valueSol.toFixed(4)} SOL of tokens found in the wallet` : `adopted orphan bag — closed as "${(close.reason || '').slice(0, 60)}" but ${valueSol.toFixed(4)} SOL of tokens remained in the wallet` });
+    console.log(unverified ? `[adopt] ${pos.symbol}: picked up a landed-but-unverified buy — ${valueSol.toFixed(4)} SOL realizable, now tracked with the TP ladder + clip armed` : `[adopt] ${pos.symbol}: picked an orphan bag back up — ${valueSol.toFixed(4)} SOL realizable, ${(remainingFrac * 100).toFixed(0)}% of the original buy, was closed as "${(close.reason || '').slice(0, 50)}"`);
     return true;
   }
 
@@ -4070,7 +4100,30 @@ export class Bot {
 
     let fill;
     try { fill = await this.exec.buy(v.address, size, rt.buyQuote); }
-    catch (e) { this.err('buy', e); checks.exec = { pass: false, reason: `buy failed (${e.message})` }; return this.skip(v, sig, [`exec: buy failed (${e.message})`], g.warnings, checks, g.pass); }
+    catch (e) {
+      this.err('buy', e);
+      if (e && e.code === 'LANDED_UNVERIFIED') {
+        // LANDED-UNVERIFIED (owner order 2026-10-21, the MILK hole): the
+        // swap was sent and may have landed — only its confirmation read
+        // failed. Journaling this as "skipped" (the old catch-all) made a
+        // real, unprotected position invisible to every watcher. Instead:
+        // an open-unverified trade record carries the sig to reconcile,
+        // which adopts the bag if it is in the wallet (TP ladder + clip
+        // armed) or resolves the record as never-landed if it is not.
+        // The mint is entered-booked like any other entry — the money may
+        // be spent, so cooldowns and the entry tally must act like it.
+        checks.exec = { pass: false, reason: `buy landed but unverified (${e.message}) — journaled open-unverified for reconcile adoption` };
+        const uvId = `${v.address.slice(0, 6)}-${n}`;
+        this.journal.trade({ type: 'open-unverified', id: uvId, mint: v.address, symbol: v.symbol, setup: sig.setup, entrySol: size, sig: e.sig || null, confirmed: e.confirmed ?? null, simulated: false, ts: n, stamp: this.cfgStamp, entryPrice: v.price ?? null, entryMc: v.mc ?? null });
+        this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decision: 'taken-unverified', reasons: [`exec: ${checks.exec.reason}`], price: v.price, mc: v.mc, metrics: { ...(sig.metrics || {}), sizeSol: size }, warnings: g.warnings, label: sig.label || null, gates: checks, gatePass: g.pass, fields: this._fieldsFor(v, sig), liqRechecks: sig.liqRechecks ?? null });
+        this.enteredMints.add(v.address); this.saveEnteredMints();
+        this.risk.recordEntry(v.address);
+        this.stats.entries++;
+        console.log(`[unverified] ${v.symbol}: buy sig ${e.sig} sent but unverified — journaled open-unverified; reconcile will adopt the bag if it landed`);
+        return;
+      }
+      checks.exec = { pass: false, reason: `buy failed (${e.message})` }; return this.skip(v, sig, [`exec: buy failed (${e.message})`], g.warnings, checks, g.pass);
+    }
 
     // D1 (record-only): entry-time facts the close record will need — token
     // decimals + the real buy fill (SOL per whole token, from the executed

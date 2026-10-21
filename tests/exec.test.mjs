@@ -142,6 +142,49 @@ test('real sell: balance that never moves throws not-confirmed', { skip: !hasSol
   await assert.rejects(ex.sell('M', '49142'), /sell not confirmed/);
 });
 
+// --- LANDED-UNVERIFIED (owner order 2026-10-21, the MILK hole): a buy whose
+// swap was signed and sent but whose confirmation read failed must surface
+// as a distinct coded error carrying the sig — never a generic "buy failed"
+// that lets the caller journal the entry as skipped while tokens sit in
+// the wallet untracked.
+const realBuyRig = async (mode) => {
+  const { Keypair } = await import('@solana/web3.js');
+  const bs58 = (await import('bs58')).default;
+  const kp = Keypair.generate();
+  const rig = { bal: 1000n, reads: 0 };
+  const rpc = async (method) => {
+    if (method === 'getTokenAccountsByOwner') {
+      rig.reads++;
+      if (mode === 'throw' && rig.reads > 1) throw new Error('rpc getTokenAccountsByOwner failed: HTTP 429');
+      return { value: [{ account: { data: { parsed: { info: { tokenAmount: { amount: rig.bal.toString() } } } } } }] };
+    }
+    throw new Error('unexpected ' + method);
+  };
+  const ex = new Executor(testCfg({ realMode: true }), { env: { WALLET_PRIVATE_KEY: bs58.encode(kp.secretKey) }, rpc, quote: quote(5_000_000, 45_000_000) });
+  ex.signAndSend = async () => ({ sig: 'SIGBUY', confirmed: true });
+  return { ex, rig };
+};
+test('real buy: verify read throws after the send — LANDED_UNVERIFIED carries the sig (MILK regression)', { skip: !hasSolana }, async () => {
+  const { ex } = await realBuyRig('throw');
+  await assert.rejects(ex.buy('M', 0.1, { outAmount: '5000000', priceImpactPct: '0' }), (e) => {
+    assert.equal(e.code, 'LANDED_UNVERIFIED');
+    assert.equal(e.sig, 'SIGBUY');
+    assert.match(e.message, /landed but unverified/);
+    return true;
+  });
+});
+test('real buy: balance never moves after the send — LANDED_UNVERIFIED, not a generic failure', { skip: !hasSolana }, async () => {
+  const { ex } = await realBuyRig('flat');
+  await assert.rejects(ex.buy('M', 0.1, { outAmount: '5000000', priceImpactPct: '0' }), (e) => e.code === 'LANDED_UNVERIFIED' && e.sig === 'SIGBUY' && e.confirmed === true);
+});
+test('real buy: a landed fill still returns normally (the unverified path is failure-only)', { skip: !hasSolana }, async () => {
+  const { ex, rig } = await realBuyRig('flat');
+  ex.signAndSend = async () => { rig.bal = 6000n; return { sig: 'SIGOK', confirmed: true }; };
+  const f = await ex.buy('M', 0.1, { outAmount: '5000000', priceImpactPct: '0' });
+  assert.equal(f.sig, 'SIGOK');
+  assert.equal(f.tokensRaw, '5000');
+});
+
 // ------------------------------------------------------------ wrong-pool guard (owner order 2026-10-19)
 test('execPoolOf: identifies the mint hop pool in single- and multi-hop routes', () => {
   const one = { routePlan: [{ swapInfo: { ammKey: 'POOL1', label: 'PumpSwap', outputMint: 'MINT' } }] };

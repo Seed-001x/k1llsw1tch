@@ -384,12 +384,25 @@ export class Executor {
     const before = (await this.tokenBalance(mint)) || 0n;
     const { sig, confirmed } = await this.signAndSend(quote);
     let after = before;
+    let verifyErr = null;
     for (let i = 0; i < 5; i++) {
-      after = (await this.tokenBalance(mint)) || 0n;
+      try { after = (await this.tokenBalance(mint)) || 0n; } catch (e) { verifyErr = e; break; }
       if (after > before) break;
       await sleep(1500);
     }
-    if (after <= before) throw new Error(`buy not confirmed (sig ${sig}, confirmed=${confirmed}) — no tokens received`);
+    if (after <= before) {
+      // LANDED-UNVERIFIED (owner order 2026-10-21, the MILK hole): the swap
+      // was signed and sent — only the confirmation read failed (an RPC
+      // 429, or verify reads that never showed the fill). The tokens may
+      // well be in the wallet, so the sig must NEVER be discarded into a
+      // generic "buy failed": this distinct error carries it to bot.js,
+      // which journals an open-unverified buy for reconcile to adopt if
+      // the bag is really there (or resolve as never-landed if it is not).
+      const err = new Error(`buy landed but unverified (sig ${sig}, confirmed=${confirmed}) — ${verifyErr ? `verify read failed: ${verifyErr.message}` : 'no tokens received on verify reads'}`);
+      err.code = 'LANDED_UNVERIFIED';
+      err.sig = sig; err.confirmed = confirmed; err.mint = mint; err.solSpent = sol;
+      throw err;
+    }
     return { tokensRaw: (after - before).toString(), solSpent: sol, sig, simulated: false };
   }
 
