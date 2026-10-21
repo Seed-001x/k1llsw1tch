@@ -32,6 +32,7 @@ import { buildVetoCard } from './vetoLab.js';
 const CPS = [5, 15, 60];          // minutes
 const EXPIRE_MIN = 90;
 const KEEP = 5000;
+const SIG_KEEP = 1500;   // full signal records held in memory (owner 2026-10-21 memory fix); older signals stay on disk
 
 function readTail(file, n) {
   // Byte-capped tail (2026-10-18 boot-OOM fix): never materialize a whole
@@ -88,7 +89,7 @@ export class Journal {
   }
 
   boot() {
-    for (const s of readTail(this.f.sig, KEEP)) { s.out = {}; this.signals.push(s); this.byId.set(s.id, s); this.seq = Math.max(this.seq, Number(String(s.id).split('-').pop()) || 0); }
+    for (const s of readTail(this.f.sig, SIG_KEEP)) { s.out = {}; this.signals.push(s); this.byId.set(s.id, s); this.seq = Math.max(this.seq, Number(String(s.id).split('-').pop()) || 0); }
     for (const o of readTail(this.f.out, KEEP * 2)) { const s = this.byId.get(o.id); if (s) s.out = o; }
     this.trades = readTail(this.f.trades, KEEP);
     this.tradeReports = readTail(this.f.reports, 100);
@@ -497,7 +498,7 @@ export class Journal {
     // deferred, so untouched records keep their exact old shape.
     if (liqRechecks != null) rec.liqRechecks = liqRechecks;
     this.signals.push(rec); this.byId.set(id, rec); rec.out = {};
-    if (this.signals.length > KEEP) { const old = this.signals.shift(); this.byId.delete(old.id); }
+    if (this.signals.length > SIG_KEEP) { const old = this.signals.shift(); this.byId.delete(old.id); }
     this.append(this.f.sig, rec);
     if (price > 0) { this.pending.set(id, { max: price, min: price, got: {}, at: {}, obs: 0, peakAgeMin: 0 }); this._pendDirty = true; }
     // Answered re-signals (record-only): a mint the user already answered is

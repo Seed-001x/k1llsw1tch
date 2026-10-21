@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { listState } from './pumpLists.js';
+import { readTailLines } from './util.js';
 import { EXIT_REASONS, EXIT_REASON_LABELS, learnReport } from './learn.js';
 import { sanitizeSettings, applySettings, settingsView, saveSettingsOverlay } from './settings.js';
 
@@ -121,14 +122,14 @@ export function buildClosesCsv(trades) {
 }
 
 export function startServer(bot, port) {
-  const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }); res.end(JSON.stringify(body, null, 2)); };
+  const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }); res.end(JSON.stringify(body)); };
   // D1 pagination: { limit, offset } when the caller asks to page, else null.
   // Endpoints that never had paging keep their EXACT legacy response when null
   // is returned, so the dashboard and existing consumers cannot break.
   const paging = (u) => {
     if (!u.searchParams.has('limit') && !u.searchParams.has('offset')) return null;
     return {
-      limit: Math.min(5000, Math.max(1, parseInt(u.searchParams.get('limit') || '50', 10) || 50)),
+      limit: Math.min(500, Math.max(1, parseInt(u.searchParams.get('limit') || '50', 10) || 50)),
       offset: Math.max(0, parseInt(u.searchParams.get('offset') || '0', 10) || 0),
     };
   };
@@ -714,7 +715,11 @@ export function startServer(bot, port) {
       const limit = Math.min(parseInt(u.searchParams.get('limit') || '500', 10) || 500, 2000);
       let lines = [];
       try {
-        const raw = fs.readFileSync(path.join(DATA_DIR, 'ticks.jsonl'), 'utf8').trim().split('\n');
+        // Bounded tail read (owner 2026-10-21): ticks.jsonl grows unbounded —
+        // never materialize the whole file for one request. Same byte-capped
+        // tail pattern as journal.js readTail, budget scaled to the limit.
+        const budget = Math.min(16 * 1024 * 1024, Math.max(4 * 1024 * 1024, limit * 8192));
+        const raw = readTailLines(path.join(DATA_DIR, 'ticks.jsonl'), budget);
         for (const ln of raw) {
           try {
             const t = JSON.parse(ln);
