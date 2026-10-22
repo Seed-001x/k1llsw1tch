@@ -53,6 +53,7 @@ function pipelineRig({ cfgOver = {}, env = {}, rug = healthyRug } = {}) {
     discover: async () => Object.assign(new Map(), { counts: {} }),
     fetchViews: async (mints) => new Map(mints.filter(m => views.has(m)).map(m => [m, views.get(m)])),
     fetchSolUsd: async () => 150, fetchRug: async () => rug, searchByName: async () => [],
+    fetchCurveLife: async () => 9999, // measured, ancient curve — these tests judge the liq re-check, not the fast-bond gate (whose blind block would stop a 2-minute-old pool with an unreadable lifespan; fastbond.test.mjs owns that doctrine)
   });
   return { bot, clock, views };
 }

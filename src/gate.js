@@ -234,10 +234,25 @@ export function insiderCountVerdict(rug, max) {
 // and elapsed time is the one number that pattern cannot fake. Only a
 // MEASURED lifespan judges: null / non-numeric / negative is unknown, and
 // unknown never blocks (a non-graduated coin has no lifespan at all).
-export function fastBondVerdict(lifeSec, maxSec) {
+export function fastBondVerdict(lifeSec, maxSec, opts = {}) {
   const raw = lifeSec == null ? NaN : Number(lifeSec);
   const life = Number.isFinite(raw) && raw >= 0 ? raw : null;
-  if (life == null) return { pass: true, lifeSec: null, unknown: true, reason: 'curve lifespan unavailable — not judged' };
+  if (life == null) {
+    // Blind block (owner order 2026-10-21, CYBERCAT): unknown still never
+    // judges a MEASUREMENT — but on a YOUNG pool (opts.poolAgeMin at or
+    // under opts.unknownBlockPoolAgeMin) an unreadable lifespan blocks
+    // the buy instead of passing it. Scoped to young pools on purpose:
+    // old coins' stamps rot (DexScreener rotates to the AMM pair) and
+    // their survival is evidence; a fresh pool with no readable birth
+    // record is exactly the fast-bonder habitat. Without opts (every
+    // pre-2026-10-21 caller) the read is the historical fail-open one.
+    const poolAgeMin = opts.poolAgeMin == null ? NaN : Number(opts.poolAgeMin);
+    const blindMax = Number(opts.unknownBlockPoolAgeMin) || 0;
+    if (blindMax > 0 && Number.isFinite(poolAgeMin) && poolAgeMin >= 0 && poolAgeMin <= blindMax) {
+      return { pass: false, lifeSec: null, unknown: true, blindBlock: true, reason: `curve lifespan unavailable on a ${Math.round(poolAgeMin)}m-old pool — not bought blind (blind fast-bond block)` };
+    }
+    return { pass: true, lifeSec: null, unknown: true, reason: 'curve lifespan unavailable — not judged' };
+  }
   if (maxSec > 0 && life < maxSec) return { pass: false, lifeSec: life, unknown: false, reason: `curve lifespan ${life}s < ${maxSec}s — fast bonder blocked` };
   return { pass: true, lifeSec: life, unknown: false, reason: `curve lived ${life}s — at or over the ${maxSec}s fast-bond line` };
 }

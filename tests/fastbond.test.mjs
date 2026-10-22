@@ -17,7 +17,7 @@ import { Bot } from '../src/bot.js';
 import { Executor } from '../src/exec.js';
 import { loadConfig, validateConfig } from '../src/config.js';
 import { fastBondVerdict } from '../src/gate.js';
-import { curveLifeFromPairs } from '../src/sources.js';
+import { curveLifeFromPairs, curveLifeFromSigTimes } from '../src/sources.js';
 import { SOL_MINT } from '../src/util.js';
 import { testCfg, view } from './helpers.mjs';
 
@@ -75,12 +75,16 @@ async function trendFire(rig, { mint = 'MINTT', symbol = 'TRENT' } = {}) {
 }
 
 // ------------------------------------------------------------ config
-test('config: fast-bond block defaults ON at 120s; env knobs read; validation bounds the line', () => {
+test('config: fast-bond block defaults ON at 180s; env knobs read; validation bounds the line', () => {
   const d = loadConfig({});
   assert.equal(d.fastBondBlock, true);
-  assert.equal(d.fastBondMaxSec, 120);
+  assert.equal(d.fastBondMaxSec, 180, 'owner order 2026-10-21: the line is 3 minutes');
   assert.equal(loadConfig({ FAST_BOND_BLOCK: '0' }).fastBondBlock, false);
   assert.equal(loadConfig({ FAST_BOND_MAX_SEC: '45' }).fastBondMaxSec, 45);
+  assert.equal(d.fastBondUnknownBlock, true, 'blind-on-young block defaults ON (2026-10-21)');
+  assert.equal(d.fastBondUnknownMaxPoolAgeMin, 60);
+  assert.equal(loadConfig({ FAST_BOND_UNKNOWN_BLOCK: '0' }).fastBondUnknownBlock, false);
+  assert.equal(loadConfig({ FAST_BOND_UNKNOWN_MAX_POOL_AGE_MIN: '30' }).fastBondUnknownMaxPoolAgeMin, 30);
   assert.ok(validateConfig({ ...d, fastBondMaxSec: 0 }).some(e => e.includes('FAST_BOND_MAX_SEC')));
   assert.ok(validateConfig({ ...d, fastBondMaxSec: 86401 }).some(e => e.includes('FAST_BOND_MAX_SEC')));
   assert.ok(!validateConfig(d).some(e => e.includes('FAST_BOND_MAX_SEC')));
@@ -96,6 +100,21 @@ test('fastBondVerdict: under the line blocks, at/over passes, unmeasured is unkn
     const v = fastBondVerdict(bad, 120);
     assert.deepEqual({ pass: v.pass, lifeSec: v.lifeSec, unknown: v.unknown }, { pass: true, lifeSec: null, unknown: true }, `${String(bad)} must read unknown`);
   }
+});
+
+test('fastBondVerdict blind block: unknown on a young pool blocks; old pool / no scope / knob off still passes', () => {
+  const young = fastBondVerdict(null, 180, { poolAgeMin: 36, unknownBlockPoolAgeMin: 60 });
+  assert.equal(young.pass, false, 'CYBERCAT shape: 36m-old pool, unreadable lifespan');
+  assert.equal(young.unknown, true, 'still honest: nothing was measured');
+  assert.equal(young.blindBlock, true);
+  assert.match(young.reason, /not bought blind/);
+  assert.equal(fastBondVerdict(null, 180, { poolAgeMin: 60, unknownBlockPoolAgeMin: 60 }).blindBlock, true, 'boundary: exactly at the age line blocks');
+  assert.equal(fastBondVerdict(null, 180, { poolAgeMin: 61, unknownBlockPoolAgeMin: 60 }).pass, true, 'past the age line the fail-open read stands');
+  assert.equal(fastBondVerdict(null, 180, { poolAgeMin: 600, unknownBlockPoolAgeMin: 60 }).pass, true, 'old pool: stamps rot, survival is evidence');
+  assert.equal(fastBondVerdict(null, 180, { poolAgeMin: null, unknownBlockPoolAgeMin: 60 }).pass, true, 'no pool age read — no scope, no block');
+  assert.equal(fastBondVerdict(null, 180, { poolAgeMin: 10, unknownBlockPoolAgeMin: 0 }).pass, true, 'knob at 0 disables the blind block');
+  assert.equal(fastBondVerdict(5000, 180, { poolAgeMin: 10, unknownBlockPoolAgeMin: 60 }).pass, true, 'a measured life is judged on its number, never on age');
+  assert.equal(fastBondVerdict(60, 180, { poolAgeMin: 10, unknownBlockPoolAgeMin: 60 }).pass, false, 'a measured sub-line life blocks as before');
 });
 
 // ------------------------------------------------------------ measurement (pure)
@@ -141,29 +160,29 @@ test('fast bond: TRUMARS shape on the TREND path — 78s curve skipped, stamped,
   const rec = await trendFire(rig);
   assert.equal(rec.setup, 'trend');
   assert.equal(rec.decision, 'skipped', JSON.stringify(rec.reasons));
-  assert.deepEqual(rec.reasons, ['curve lifespan 78s < 120s — fast bonder blocked']);
+  assert.deepEqual(rec.reasons, ['curve lifespan 78s < 180s — fast bonder blocked']);
   assert.equal(rec.gatePass, true, 'the gate stack itself passed — the block is what stopped it');
   assert.equal(rec.gates.fastBond.pass, false);
   assert.equal(rec.gates.fastBond.curveLifeSec, 78);
-  assert.equal(rec.gates.fastBond.max, 120);
+  assert.equal(rec.gates.fastBond.max, 180);
   assert.equal(rig.bot.positions.length, 0);
   assert.equal(rig.bot.stats.entries, 0);
   assert.deepEqual(rig.bot.stats.fastBond, { blocked: 1, passed: 0, unknown: 0 });
   assert.equal(rig.curveLifeCalls(), 1, 'measured lazily, once, at the seam');
 });
 
-test('fast bond: boundary — 119s blocks, exactly 120s buys with the stamp on the taken record', async () => {
-  const r119 = pipelineRig({ curveLife: 119 });
-  const rec119 = await popFire(r119);
-  assert.equal(rec119.decision, 'skipped');
-  assert.deepEqual(rec119.reasons, ['curve lifespan 119s < 120s — fast bonder blocked']);
-  const r120 = pipelineRig({ curveLife: 120 });
-  const rec120 = await popFire(r120);
-  assert.equal(rec120.decision, 'taken', JSON.stringify(rec120.reasons));
-  assert.equal(rec120.gates.fastBond.pass, true);
-  assert.equal(rec120.gates.fastBond.curveLifeSec, 120);
-  assert.equal(r120.bot.positions.length, 1);
-  assert.deepEqual(r120.bot.stats.fastBond, { blocked: 0, passed: 1, unknown: 0 });
+test('fast bond: boundary — 179s blocks, exactly 180s buys with the stamp on the taken record', async () => {
+  const r179 = pipelineRig({ curveLife: 179 });
+  const rec179 = await popFire(r179);
+  assert.equal(rec179.decision, 'skipped');
+  assert.deepEqual(rec179.reasons, ['curve lifespan 179s < 180s — fast bonder blocked']);
+  const r180 = pipelineRig({ curveLife: 180 });
+  const rec180 = await popFire(r180);
+  assert.equal(rec180.decision, 'taken', JSON.stringify(rec180.reasons));
+  assert.equal(rec180.gates.fastBond.pass, true);
+  assert.equal(rec180.gates.fastBond.curveLifeSec, 180);
+  assert.equal(r180.bot.positions.length, 1);
+  assert.deepEqual(r180.bot.stats.fastBond, { blocked: 0, passed: 1, unknown: 0 });
 });
 
 test('fast bond: FAST_BOND_MAX_SEC moves the line — 78s passes at 60, 59s blocks', async () => {
@@ -179,7 +198,7 @@ test('fast bond: a measured 0s curve life (same-second bonder) is BLOCKED on the
   const rig = pipelineRig({ curveLife: 0 });
   const rec = await popFire(rig);
   assert.equal(rec.decision, 'skipped', JSON.stringify(rec.reasons));
-  assert.deepEqual(rec.reasons, ['curve lifespan 0s < 120s — fast bonder blocked']);
+  assert.deepEqual(rec.reasons, ['curve lifespan 0s < 180s — fast bonder blocked']);
   assert.equal(rec.gates.fastBond.pass, false);
   assert.equal(rec.gates.fastBond.curveLifeSec, 0);
   assert.equal(rec.gates.fastBond.unknown, undefined, 'a measured life is judged — the unknown stamp is only set when unmeasured');
@@ -249,4 +268,67 @@ test('curve life cache: unknown is negatively cached 60s, then re-measured (grad
   life = 5000;
   assert.equal(await rig.bot._curveLifeSec('MINTX'), 5000, 'after the window the mint is re-measured');
   assert.equal(rig.curveLifeCalls(), 2);
+});
+
+// ------------------------------------------------------------ blind block (owner order 2026-10-21, CYBERCAT)
+async function popFireYoung(rig, { mint = 'MINTY', symbol = 'YOUNG', ageMin = 30 } = {}) {
+  const v = view({ address: mint, symbol, mc: 500_000, liq: 100_000, createdAt: T0 - ageMin * 60e3, dex: 'pumpswap' });
+  rig.views.set(mint, v);
+  await rig.bot.start();
+  seedHistory(rig.bot, mint);
+  await rig.bot.onSignal(v, { setup: 'pop', strength: 42, metrics: { gainPct: 42, volM5: 100_000 } });
+  return rig.bot.journal.signals.at(-1);
+}
+
+test('blind block: CYBERCAT shape — unreadable lifespan on a 30m-old pool is SKIPPED, not bought blind', async () => {
+  const rig = pipelineRig({ curveLife: null });
+  const rec = await popFireYoung(rig);
+  assert.equal(rec.decision, 'skipped', JSON.stringify(rec.reasons));
+  assert.equal(rec.reasons.length, 1);
+  assert.match(rec.reasons[0], /curve lifespan unavailable on a 30m-old pool — not bought blind/);
+  assert.equal(rec.gates.fastBond.pass, false);
+  assert.equal(rec.gates.fastBond.curveLifeSec, null, 'nothing was measured — the record stays honest');
+  assert.equal(rec.gates.fastBond.unknown, true);
+  assert.equal(rec.gates.fastBond.blindBlock, true);
+  assert.equal(rig.bot.positions.length, 0);
+  assert.equal(rig.bot.stats.fastBond.blindBlocked, 1);
+  assert.equal(rig.bot.stats.fastBond.blocked, 0, 'a blind block is not a measured block');
+  assert.equal(rig.bot.stats.fastBond.unknown, 0, 'nor a passed unknown');
+  assert.equal(rig.bot.birthVerdicts.size, 0, 'blindness writes NO birth verdict — a later read may judge the mint fresh');
+});
+
+test('blind block: FAST_BOND_UNKNOWN_BLOCK off restores fail-open on the same young blind coin', async () => {
+  const rig = pipelineRig({ cfgOver: { fastBondUnknownBlock: false }, curveLife: null });
+  const rec = await popFireYoung(rig);
+  assert.equal(rec.decision, 'taken', JSON.stringify(rec.reasons));
+  assert.equal(rec.gates.fastBond.unknown, true);
+  assert.equal(rec.gates.fastBond.blindBlock, undefined);
+  assert.equal(rig.bot.stats.fastBond.unknown, 1);
+});
+
+test('blind block: young pool with a MEASURED long life buys; blind read past the age line buys', async () => {
+  const measured = pipelineRig({ curveLife: 5000 });
+  const recM = await popFireYoung(measured);
+  assert.equal(recM.decision, 'taken', JSON.stringify(recM.reasons));
+  assert.equal(recM.gates.fastBond.curveLifeSec, 5000);
+  const old = pipelineRig({ curveLife: null });
+  const recO = await popFireYoung(old, { ageMin: 61 });
+  assert.equal(recO.decision, 'taken', JSON.stringify(recO.reasons));
+  assert.equal(recO.gates.fastBond.unknown, true);
+  assert.equal(recO.gates.fastBond.blindBlock, undefined, 'past the 60m scope the fail-open read stands');
+});
+
+// ------------------------------------------------------------ chain measurement (pure)
+test('curveLifeFromSigTimes: complete window is the exact span; order and junk are handled', () => {
+  assert.equal(curveLifeFromSigTimes([1000, 1078], true, 180), 78, 'the TRUMARS span from chain times');
+  assert.equal(curveLifeFromSigTimes([1078, 1000], true, 180), 78, 'unsorted input is sorted');
+  assert.equal(curveLifeFromSigTimes([1000, null, NaN, -3, 1078], true, 180), 78, 'junk entries are ignored');
+  assert.equal(curveLifeFromSigTimes([1000], true, 180), null, 'one timestamp measures nothing');
+  assert.equal(curveLifeFromSigTimes([], true, 180), null);
+  assert.equal(curveLifeFromSigTimes(null, true, 180), null);
+});
+
+test('curveLifeFromSigTimes: a truncated window speaks only when its span alone clears the line', () => {
+  assert.equal(curveLifeFromSigTimes([1000, 1500], false, 180), 500, 'lower bound 500s >= 180s line: the true life is longer still — a sound pass measurement');
+  assert.equal(curveLifeFromSigTimes([1000, 1100], false, 180), null, 'lower bound under the line proves nothing — unknown');
 });

@@ -64,7 +64,7 @@ function rig({ cfgOver = {}, rug = healthyRug, dataDir = null } = {}) {
 async function boot(r) { await r.bot.start(); }
 
 async function fire(r, { mint, symbol, setup }) {
-  const v = view({ address: mint, symbol, mc: 300_000, liq: 100_000, createdAt: T0 - 44 * 60000, dex: 'pumpswap' });
+  const v = view({ address: mint, symbol, mc: 300_000, liq: 100_000, createdAt: T0 - 120 * 60000, dex: 'pumpswap' }); // 120m old: outside the blind fast-bond scope (60m) — these tests judge memory, not the blind block (fastbond.test.mjs owns that)
   r.views.set(mint, v);
   seedHistory(r.bot, mint);
   await r.bot.onSignal(v, { setup, metrics: setup === 'pop' ? { gainPct: 42, volM5: 100_000 } : { volM5: 100_000 } });
@@ -129,7 +129,7 @@ test('(iii) a measured fastBond block writes a verdict; a later eval whose stamp
   await boot(r);
   r.live.curveLife = 27;
   const rec1 = await fire(r, { mint: 'MINTFB', symbol: 'FB', setup: 'pop' });
-  assert.deepEqual(rec1.reasons, ['curve lifespan 27s < 120s — fast bonder blocked']);
+  assert.deepEqual(rec1.reasons, ['curve lifespan 27s < 180s — fast bonder blocked']);
   const bv = r.bot.birthVerdicts.get('MINTFB');
   assert.equal(bv.kind, 'fastBond');
   assert.match(bv.evidence, /curve lifespan 27s/);
@@ -140,7 +140,7 @@ test('(iii) a measured fastBond block writes a verdict; a later eval whose stamp
   const callsBefore = r.live.curveLifeCalls;
   const rec2 = await fire(r, { mint: 'MINTFB', symbol: 'FB', setup: 'pop' });
   assert.equal(rec2.decision, 'skipped', JSON.stringify(rec2.reasons));
-  assert.match(rec2.reasons[0], /^known fast bonder \(fastBond: curve lifespan 27s < 120s — fast bonder blocked; verdict .* old\) — blocked from memory$/);
+  assert.match(rec2.reasons[0], /^known fast bonder \(fastBond: curve lifespan 27s < 180s — fast bonder blocked; verdict .* old\) — blocked from memory$/);
   assert.equal(rec2.gates.birthMemory.kind, 'fastBond');
   assert.equal(r.live.curveLifeCalls, callsBefore, 'the memory answered before the fresh fetch');
   assert.equal(r.bot.stats.fastBond.blocked, 1, 'the fresh gate blocked only the first evaluation');

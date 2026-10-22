@@ -21,7 +21,7 @@ const settingsApplied = applySettings(cfg, settingsOverlay);
 if (settingsApplied.length) console.log(`[edgebot] settings overlay applied over env (${settingsApplied.length}): ${settingsApplied.join(', ')}`);
 
 const exec = new Executor(cfg);
-const bot = new Bot(cfg, { discover, fetchViews, fetchSolUsd, fetchRug, fetchCurve: (mint) => fetchCurve(mint, cfg), fetchCurveLife, fetchHolderCount: (mint) => fetchHolderCount(mint, { rpcUrls: cfg.rpcUrls }), ranRebuyCheck, exec, settingsBaseline, settingsOverlay });
+const bot = new Bot(cfg, { discover, fetchViews, fetchSolUsd, fetchRug, fetchCurve: (mint) => fetchCurve(mint, cfg), fetchCurveLife: (mint) => fetchCurveLife(mint, cfg), fetchHolderCount: (mint) => fetchHolderCount(mint, { rpcUrls: cfg.rpcUrls }), ranRebuyCheck, exec, settingsBaseline, settingsOverlay });
 
 console.log(`[edgebot] mode=${cfg.realMode ? 'REAL' : 'SHADOW'}${cfg.modeWarning ? '  (' + cfg.modeWarning + ')' : ''}`);
 console.log(`[edgebot] limits: ${cfg.tradeSol} SOL/trade, ${cfg.maxPositions} positions, daily loss cap ${cfg.dailyLossSol} SOL, kill at <${cfg.killEquityFrac * 100}% equity`);

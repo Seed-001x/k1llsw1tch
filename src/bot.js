@@ -3989,9 +3989,26 @@ export class Bot {
     }
 
     if (this.cfg.fastBondBlock) {
-      const fb = fastBondVerdict(await this._curveLifeSec(v.address), this.cfg.fastBondMaxSec);
+      // Pool age at the seam (the view's representative pair age — the
+      // same number signalFields journals as poolAgeMin) scopes the
+      // blind block: an unreadable lifespan blocks only a YOUNG pool
+      // (owner order 2026-10-21, CYBERCAT — see gate.js fastBondVerdict).
+      const poolAgeMin = v.createdAt && v.createdAt <= n ? (n - v.createdAt) / 60000 : null;
+      const fb = fastBondVerdict(await this._curveLifeSec(v.address), this.cfg.fastBondMaxSec, {
+        poolAgeMin,
+        unknownBlockPoolAgeMin: this.cfg.fastBondUnknownBlock ? this.cfg.fastBondUnknownMaxPoolAgeMin : 0,
+      });
       this.stats.fastBond = this.stats.fastBond || { blocked: 0, passed: 0, unknown: 0 };
       checks.fastBond = { pass: fb.pass, curveLifeSec: fb.lifeSec, max: this.cfg.fastBondMaxSec, reason: fb.reason };
+      if (fb.blindBlock) {
+        // NOT a birth verdict: blindness is missing evidence, not a
+        // measurement — nothing is persisted, and a later evaluation
+        // whose reads work judges this mint fresh.
+        checks.fastBond.unknown = true; checks.fastBond.blindBlock = true;
+        this.stats.fastBond.blindBlocked = (this.stats.fastBond.blindBlocked || 0) + 1;
+        console.log(`[fastbond] skip (blind): ${v.symbol} — ${fb.reason}`);
+        return this.skip(v, sig, [fb.reason], g.warnings, checks, g.pass);
+      }
       if (fb.unknown) { checks.fastBond.unknown = true; this.stats.fastBond.unknown++; }
       else if (!fb.pass) {
         this.stats.fastBond.blocked++;

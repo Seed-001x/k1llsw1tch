@@ -205,14 +205,58 @@ export function curveLifeFromPairs(pairs) {
   return lifeSec > 0 ? lifeSec : null;
 }
 
+/**
+ * Pure: a graduated coin's bonding-curve lifespan in seconds from the
+ * blockTimes of the curve PDA's own signature history (oldest = curve
+ * creation / first interaction, newest = the migration that closed it —
+ * nothing touches the account after graduation). `complete` says the
+ * signature window reached the account's first signature (fewer returned
+ * than the fetch limit), making the span exact. A truncated window's span
+ * is only a LOWER bound on the lifespan: sound as a measurement solely
+ * when the bound alone clears maxSec (the true life is longer still);
+ * under the line it proves nothing and reads null (unknown).
+ */
+export function curveLifeFromSigTimes(times, complete, maxSec) {
+  const t = (Array.isArray(times) ? times : []).map(Number).filter(x => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
+  if (t.length < 2) return null;
+  const span = t[t.length - 1] - t[0];
+  if (complete) return span;
+  return span >= (Number(maxSec) || 0) && (Number(maxSec) || 0) > 0 ? span : null;
+}
+
+/** Curve lifespan from chain when DexScreener's pair stamps are missing
+ *  (owner order 2026-10-21, CYBERCAT: DS returned no usable curve stamp
+ *  at the buy evaluation and the gate went blind). ONE getSignaturesForAddress
+ *  call against the bonding-curve PDA — no per-tx reads — trying each
+ *  configured RPC in turn (curveChain.rpc). Any failure resolves to null:
+ *  the chain is a second witness, never a new way to invent a number. */
+export async function fetchCurveLifeChain(mint, cfg) {
+  if (!mint || !cfg || !cfg.rpcUrls || !cfg.rpcUrls.length) return null;
+  try {
+    const [{ rpc, PUMP_PROGRAM }, { PublicKey }] = await Promise.all([import('./curveChain.js'), import('@solana/web3.js')]);
+    const [curve] = PublicKey.findProgramAddressSync(
+      [Buffer.from('bonding-curve'), new PublicKey(mint).toBuffer()],
+      new PublicKey(PUMP_PROGRAM),
+    );
+    const sigs = await rpc(cfg.rpcUrls, 'getSignaturesForAddress', [curve.toBase58(), { limit: 1000 }], 9000);
+    if (!Array.isArray(sigs)) return null;
+    return curveLifeFromSigTimes(sigs.map(s => s && s.blockTime), sigs.length < 1000, cfg.fastBondMaxSec);
+  } catch { return null; }
+}
+
 /** Curve lifespan for one mint via the same DexScreener token-pairs read
  *  fetchCurve uses (fail-open: any fetch error resolves to null = unknown).
  *  The timeout is bounded tighter than the 8s house default on purpose:
  *  this is fetched lazily at the entry seam, and a slow read must degrade
- *  to unknown (entry proceeds) rather than hold a fill hostage. */
-export async function fetchCurveLife(mint) {
+ *  to unknown (entry proceeds) rather than hold a fill hostage. When the
+ *  DexScreener stamps measure nothing and cfg carries RPC URLs, the chain
+ *  fallback above gets one bounded call to measure the lifespan from the
+ *  curve account's own signature history (2026-10-21). */
+export async function fetchCurveLife(mint, cfg) {
   const pairs = await fetchJson(`${DS}/token-pairs/v1/solana/${mint}`, { timeout: 5000 });
-  return curveLifeFromPairs(pairs);
+  const life = curveLifeFromPairs(pairs);
+  if (life != null) return life;
+  return fetchCurveLifeChain(mint, cfg);
 }
 
 // ------------------------------------------------------------------ discovery lists
