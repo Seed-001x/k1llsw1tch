@@ -165,6 +165,14 @@ export function loadConfig(env = process.env) {
     trendEntryMaxSignals: num(env, 'TREND_ENTRY_MAX_SIGNALS', 2), // the owner's cap: "only the 1 or 2nd time it signals not the 20th"
     enrollSignals: num(env, 'ENROLL_SIGNALS', 0),            // ENROLLMENT REMOVED (owner order 2026-10-18 22:29 EDT, "make every signal buy directly — no more enrollment"): 0 = a signal that passes the stack buys directly, for every setup — the base-mode demotion to base-watch enrollment does not run. 1 = restores the 2026-10-16 base-mode routing (signals enroll; entries only from formed bases + the bypass lanes). Base doors (staircase/bottom/range) are unaffected either way — they never demoted.
     maxCoinAgeDays: num(env, 'MAX_COIN_AGE_DAYS', 14),       // AGE CAP (owner order 2026-10-18 22:30 EDT, "no buying 2 week old coins or anything above"): a coin whose pair is already this many days old at signal time never buys, on any door. Judged in onSignal with the other user-ruling vetoes; unknown age (no createdAt on the view) never blocks, the top-guard doctrine. 0 = off.
+    // ESTABLISHED-RUNNER LANE (owner order 2026-10-22 19:39 EDT, the yagi case: Nagi and Pokke, 19h old, signaled 3x in one day — staircase at $369K, pop at $572K and $868K — and the flat age cap vetoed all three): a coin OVER the age cap may still enter through this lane when its tape proves it is an established runner rather than a dead old coin (gate.js runnerLaneVerdict, judged at the age-cap seam in onSignal). The lane lifts ONLY the age veto — the full gate stack, insider block, birth gates, census and risk checks judge a lane entry exactly like any other, and sizing is the normal slot dial. RUNNER_LANE=0 is the kill switch (the age cap is absolute again; records exactly as before). RUNNER_MAX_AGE_DAYS is the lane's own ceiling — past it a coin is stale no matter how loud the tape is.
+    runnerLane: num(env, 'RUNNER_LANE', 1) === 1,
+    runnerMinMcUsd: num(env, 'RUNNER_MIN_MC_USD', 300000),        // established floor: market cap at or above this
+    runnerMinVolH1Usd: num(env, 'RUNNER_MIN_VOL_H1_USD', 50000),  // sustained-volume floor: trailing-hour volume at or above this
+    runnerMinVolM5Usd: num(env, 'RUNNER_MIN_VOL_M5_USD', 15000),  // live-tape floor: 5-minute volume at or above this
+    runnerMinBuyRatioM5: num(env, 'RUNNER_MIN_BUY_RATIO_M5', 0.55), // buyers' share of the 5-minute tape at or above this
+    runnerMaxDrawPeakPct: num(env, 'RUNNER_MAX_DRAW_PEAK_PCT', 10), // price no more than this % under its trailing-hour peak (measurable reads only)
+    runnerMaxAgeDays: num(env, 'RUNNER_MAX_AGE_DAYS', 2),         // the lane's own age ceiling, in days
     // Base-strategy entry gates (owner decision 2026-10-16 23:16 EDT,
     // off tonight's range burst — the range path bought DEAD coins:
     // entry volM5 stamps of $0 / $17 / $137 / $186 / $524 / $958 against
@@ -280,6 +288,7 @@ export function loadConfig(env = process.env) {
     liqRecheckWindowSec: num(env, 'LIQ_RECHECK_WINDOW_SEC', 90),
     liqRecheckMaxAgeMin: num(env, 'LIQ_RECHECK_MAX_AGE_MIN', 10),
 
+    popLive: num(env, 'POP_LIVE', 1) === 1,          // LIVE flip kill switch (owner order 2026-10-22 19:48 EDT, "pop off, staircase only" — after a day of pop entries clipping inside the first minute): true (default) = pop signals route through the live pipeline. POP_LIVE=0 restores shadow routing for pop — signals are journaled + outcome-tracked (shadowGateRecord + virtual shadow trades) but never bought, exactly the TREND_LIVE mechanism. Bot.shadowedSetup consults it only when the knob is present (a hand-built cfg without it keeps pop live, the historical behavior).
     // ---- 'pop' detector (needs live history: flat → vertical) ----
     popWindowSec: num(env, 'POP_WINDOW_SEC', 300),
     popGainPct: num(env, 'POP_GAIN_PCT', 35),
@@ -1050,6 +1059,12 @@ export function validateConfig(cfg) {
   if (cfg.trendEntryMaxSignals < 1 || cfg.trendEntryMaxSignals > 20) errs.push('TREND_ENTRY_MAX_SIGNALS must be between 1 and 20');
   if (cfg.enrollSignals < 0 || cfg.enrollSignals > 1) errs.push('ENROLL_SIGNALS must be 0 or 1');
   if (cfg.maxCoinAgeDays < 0 || cfg.maxCoinAgeDays > 365) errs.push('MAX_COIN_AGE_DAYS must be between 0 and 365');
+  if (!(cfg.runnerMinMcUsd >= 0)) errs.push('RUNNER_MIN_MC_USD must be >= 0 (USD)');
+  if (!(cfg.runnerMinVolH1Usd >= 0)) errs.push('RUNNER_MIN_VOL_H1_USD must be >= 0 (USD)');
+  if (!(cfg.runnerMinVolM5Usd >= 0)) errs.push('RUNNER_MIN_VOL_M5_USD must be >= 0 (USD)');
+  if (cfg.runnerMinBuyRatioM5 < 0 || cfg.runnerMinBuyRatioM5 > 1) errs.push('RUNNER_MIN_BUY_RATIO_M5 must be between 0 and 1');
+  if (cfg.runnerMaxDrawPeakPct < 0 || cfg.runnerMaxDrawPeakPct > 100) errs.push('RUNNER_MAX_DRAW_PEAK_PCT must be between 0 and 100');
+  if (!(cfg.runnerMaxAgeDays > 0) || cfg.runnerMaxAgeDays > 365) errs.push('RUNNER_MAX_AGE_DAYS must be > 0 and <= 365');
   if (!(cfg.flowConfirmWindowH > 0) || cfg.flowConfirmWindowH > 72) errs.push('FLOW_CONFIRM_WINDOW_H must be > 0 and <= 72');
   if (!(cfg.flowConfirmMinMc >= 0)) errs.push('FLOW_CONFIRM_MIN_MC must be >= 0');
   if (!(cfg.flowConfirmSol > 0) || cfg.flowConfirmSol > 1) errs.push('FLOW_CONFIRM_SOL must be > 0 and <= 1');

@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { History } from './history.js';
 import { detect, detectChurn, detectLiftoff, eligible, eligibleChecks, liqFamilyChecks, fastPop, fastPopFloors, judgeScan, closestCall, betterScanVerdict } from './detect.js';
-import { runGates, hasHardFail, tempRuleViolation, blockedNameWord, extensionCheck, freshHistoryCheck, flowSnapshotCheck, shallowDipCheck, summarizeGateChecks, holderSamples, foldLastTrades, insiderCountVerdict, fastBondVerdict, burstBondVerdict, birthMemoryVerdict, topGuardVerdict } from './gate.js';
+import { runGates, hasHardFail, tempRuleViolation, blockedNameWord, extensionCheck, freshHistoryCheck, flowSnapshotCheck, shallowDipCheck, runnerLaneVerdict, summarizeGateChecks, holderSamples, foldLastTrades, insiderCountVerdict, fastBondVerdict, burstBondVerdict, birthMemoryVerdict, topGuardVerdict } from './gate.js';
 import { computeSignalFields } from './signalFields.js';
 import { evaluateExit } from './exits.js';
 import { ShadowFlow, ratchetArmed, ratchetShadowFire } from './ratchetShadow.js';
@@ -2139,7 +2139,8 @@ export class Bot {
   // behavior is byte-identical. Liftoff keeps its own shadow knob, untouched.
   shadowedSetup(setup) {
     const trendShadowed = this.cfg.trendLive == null ? !!this.cfg.trendShadow : !this.cfg.trendLive;
-    return (setup === 'trend' && trendShadowed) || (setup === 'liftoff' && !!this.cfg.liftoffShadow);
+    const popShadowed = this.cfg.popLive == null ? false : !this.cfg.popLive;
+    return (setup === 'trend' && trendShadowed) || (setup === 'liftoff' && !!this.cfg.liftoffShadow) || (setup === 'pop' && popShadowed);
   }
 
   shadow(v, sig, gates = null, gatePass = null) {
@@ -3673,9 +3674,42 @@ export class Bot {
       const ageDays = (n - v.createdAt) / 86400000;
       if (ageDays >= this.cfg.maxCoinAgeDays) {
         const reason = `coin is ${ageDays.toFixed(1)} days old — over the ${this.cfg.maxCoinAgeDays}-day max age, no buys`;
-        console.log(`[agecap] skip: ${v.symbol} — ${reason}`);
         checks.ageCap = { pass: false, reason, ageDays: +ageDays.toFixed(2), maxDays: this.cfg.maxCoinAgeDays };
-        return this.skip(v, sig, [`age cap: ${reason}`], [], checks);
+        // ESTABLISHED-RUNNER LANE (owner order 2026-10-22, the yagi
+        // case): the flat cap cannot tell a dead old coin from an
+        // established runner hours into a volume-backed climb, so a
+        // capped coin gets one lane hearing (gate.js runnerLaneVerdict)
+        // on its live tape. A lane pass lifts ONLY this veto — the
+        // signal continues into the full pipeline below and every other
+        // check judges it exactly as usual; the ageCap check stays on
+        // the record as failed, with the lane's verdict beside it. A
+        // lane fail skips on the age cap exactly as before, with the
+        // lane's reason appended. RUNNER_LANE=0: no hearing, the cap is
+        // absolute, records byte-identical to before the lane existed.
+        if (this.cfg.runnerLane) {
+          const rl = runnerLaneVerdict(v, {
+            ageDays, samples: this.history.get(v.address), now: n,
+            metricsDraw: sig.metrics && sig.metrics.drawFromPeak != null ? sig.metrics.drawFromPeak : null,
+            minMc: this.cfg.runnerMinMcUsd, minVolH1: this.cfg.runnerMinVolH1Usd, minVolM5: this.cfg.runnerMinVolM5Usd,
+            minBuyRatio: this.cfg.runnerMinBuyRatioM5, maxDrawPeakPct: this.cfg.runnerMaxDrawPeakPct, maxAgeDays: this.cfg.runnerMaxAgeDays,
+          });
+          this.stats.runnerLane = this.stats.runnerLane || { evaluated: 0, passed: 0 };
+          this.stats.runnerLane.evaluated++;
+          checks.runnerLane = { pass: !!rl.pass, reason: rl.reason, ...rl.stamp };
+          if (rl.pass) {
+            this.stats.runnerLane.passed++;
+            sig.runnerLane = true;
+            sig.metrics = sig.metrics || {};
+            sig.metrics.runnerLane = rl.stamp;
+            console.log(`[runnerlane] ${v.symbol} — ${rl.reason} — age veto lifted, the full gate stack still judges`);
+          } else {
+            console.log(`[agecap] skip: ${v.symbol} — ${reason} (runner lane: ${rl.reason})`);
+            return this.skip(v, sig, [`age cap: ${reason}`, `runner lane: ${rl.reason}`], [], checks);
+          }
+        } else {
+          console.log(`[agecap] skip: ${v.symbol} — ${reason}`);
+          return this.skip(v, sig, [`age cap: ${reason}`], [], checks);
+        }
       }
     }
     // Ran-rebuy block (user 2026-10-15, "for tonight" — RAN_REBUY lifts it):

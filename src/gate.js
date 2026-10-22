@@ -431,6 +431,56 @@ export function shallowDipCheck(samples, price, now, { maxPct = 0.10, windowMin 
   };
 }
 
+// Established-runner lane (owner order 2026-10-22, the yagi case —
+// Nagi and Pokke, 19h old, signaled three times in one day at $369K /
+// $572K / $868K market cap and the flat age cap vetoed all three): a coin
+// OVER the age cap is not automatically a dead coin — some are
+// established runners, hours into a volume-backed climb. The lane is
+// judged at the age-cap seam in onSignal and lifts ONLY the age veto:
+// the coin must prove established (market cap), alive NOW (sustained
+// hourly volume + live 5-minute volume), bought (buyers in control of
+// the 5-minute tape) and climbing (price holding near its trailing-hour
+// sampled peak — deep under the peak is a bounce off a top, not a
+// climb). The peak leg is judged on the bot's own samples, falls back
+// to the signal's own drawFromPeak, and passes unmeasured when neither
+// exists (the top-guard doctrine: unknown never blocks) — every other
+// leg is measured off the view and fails on a short read, because an
+// unmeasurable tape is not a running tape. Past maxAgeDays the coin is
+// stale no matter how loud it gets.
+export function runnerLaneVerdict(view, { ageDays = null, samples = [], metricsDraw = null, now = Date.now(), minMc = 300000, minVolH1 = 50000, minVolM5 = 15000, minBuyRatio = 0.55, maxDrawPeakPct = 10, maxAgeDays = 2 } = {}) {
+  const usd = (x) => '$' + Math.round(x || 0).toLocaleString('en-US');
+  const stamp = { ageDays: ageDays != null ? +ageDays.toFixed(2) : null, mc: view.mc ?? null, volH1: view.volH1 || 0, volM5: view.volM5 || 0, buyRatioM5: null, drawPeakPct: null };
+  const fail = (reason) => ({ pass: false, reason, stamp });
+  if (ageDays != null && ageDays > maxAgeDays) return fail(`coin is ${ageDays.toFixed(1)} days old — past the runner lane's ${maxAgeDays}-day ceiling, stale no matter the tape`);
+  if (!(view.mc > 0)) return fail('market cap unknown — cannot prove the coin is established');
+  if (view.mc < minMc) return fail(`market cap ${usd(view.mc)} — under the runner lane's ${usd(minMc)} established floor`);
+  if (!((view.volH1 || 0) >= minVolH1)) return fail(`hourly volume ${usd(view.volH1)} — under the runner lane's ${usd(minVolH1)} sustained-volume floor`);
+  if (!((view.volM5 || 0) >= minVolM5)) return fail(`5-minute volume ${usd(view.volM5)} — under the runner lane's ${usd(minVolM5)} live-tape floor`);
+  const buys = view.buysM5 || 0, sells = view.sellsM5 || 0;
+  if (buys + sells <= 0) return fail('no 5-minute tape at all — not a running coin');
+  const ratio = buys / (buys + sells);
+  stamp.buyRatioM5 = +ratio.toFixed(2);
+  if (ratio < minBuyRatio) return fail(`buyers hold only ${Math.round(ratio * 100)}% of the 5-minute tape — under the runner lane's ${Math.round(minBuyRatio * 100)}% line`);
+  let draw = null;
+  const win = (samples || []).filter(s => s && s.price > 0 && now - s.ts <= 3600000);
+  if (win.length >= 3) {
+    const tsList = win.map(s => s.ts);
+    if ((Math.max(...tsList) - Math.min(...tsList)) / 1000 >= 60) {
+      const top = Math.max(...win.map(s => s.price));
+      if (top > 0 && view.price > 0) draw = (top - view.price) / top;
+    }
+  }
+  if (draw == null && metricsDraw != null && isFinite(metricsDraw)) draw = metricsDraw;
+  if (draw != null) {
+    stamp.drawPeakPct = +(draw * 100).toFixed(1);
+    if (draw * 100 > maxDrawPeakPct) return fail(`price is ${stamp.drawPeakPct}% under its trailing-hour peak — past the runner lane's ${maxDrawPeakPct}% line (a bounce off a top, not a climb)`);
+  }
+  return {
+    pass: true, stamp,
+    reason: `established runner: ${stamp.ageDays != null ? stamp.ageDays.toFixed(1) + 'd old, ' : ''}${usd(view.mc)} cap, ${usd(view.volH1)} hourly volume, buyers at ${Math.round(ratio * 100)}% of the live tape${stamp.drawPeakPct != null ? `, holding ${stamp.drawPeakPct}% under its hour peak` : ''}`,
+  };
+}
+
 // 7e. Fresh-history fail-closed (user 2026-10-13, entry-fixes A3): coins discovered mid-run
 //     from the trending/movers lists arrive with little or no sampled history, and the
 //     sample-judged guard above (extension) fails OPEN on thin data — it waved
