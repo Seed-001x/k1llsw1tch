@@ -72,15 +72,21 @@ test('the line: above −7% nothing stamps; deep red on a LIVE tape still clips 
 });
 
 test('scope: TP1 banking takes the position out of the rule and drops any carried pending', () => {
+  // tp1Guard 0: guard pinned off because it owns the middle-stage give-back
+  // since 2026-10-22 and this test isolates the clip's scope — with the
+  // guard on, the −20% middle-stage print below would exit on the guard
+  // floor, which is the guard working, not the clip (guard behavior:
+  // tp1guard.test.mjs). The clip assertions are unchanged.
+  const c = testCfg({ txFeeSol: 0, tp1Guard: 0 });
   const p = pos();
-  step(p, -15, cfg, NOW);                                          // pending stamped pre-TP1
+  step(p, -15, c, NOW);                                            // pending stamped pre-TP1
   assert.equal(p.clipPending, NOW);
   const mid = { ...p, tp1Done: true, remainingFrac: 0.6 };         // TP1 banks before the window completes
-  const d = step(mid, -20, cfg, NOW + 120 * S);
+  const d = step(mid, -20, c, NOW + 120 * S);
   assert.equal(d.fraction, 0);                                     // the middle judges own it now: no clip
   assert.equal(mid.clipPending, null);                             // and the stale stamp is gone
   const bag = pos({ tp1Done: true, tp2Done: true, remainingFrac: 0.25, peakRatio: 2 });
-  assert.equal(step(bag, -20, cfg, NOW).fraction, 0);              // moonbag: out of scope entirely
+  assert.equal(step(bag, -20, c, NOW).fraction, 0);                // moonbag: out of scope entirely
 });
 
 test('switches: protect does NOT block it (same posture as the stall exit); takeover silences it', () => {

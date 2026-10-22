@@ -4568,6 +4568,8 @@ const takenSigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setu
     if ('bagFloorSince' in decision) pos.bagFloorSince = decision.bagFloorSince;
     if ('bagTp2Ratio' in decision) pos.bagTp2Ratio = decision.bagTp2Ratio;
     if ('bagTrimDone' in decision) pos.bagTrimDone = decision.bagTrimDone;
+    if ('tp1FireGain' in decision) pos.tp1FireGain = decision.tp1FireGain;
+    if ('tp1GuardTrimmed' in decision) pos.tp1GuardTrimmed = decision.tp1GuardTrimmed;
     // fail-safe confirmation outcomes (user 2026-10-14): count the windows that held to a
     // sell vs the triggers that recovered and were cancelled — the layer's report card.
     if (decision.exitConfirmEvents && decision.exitConfirmEvents.length) {

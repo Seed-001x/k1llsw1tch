@@ -59,10 +59,13 @@ test('full lifecycle: pop → gates pass → buy → adaptive TP1 → TP2 → mo
   assert.equal(r.bot.positions[0].tp1Done, true);
   assert.ok(Math.abs(r.bot.positions[0].remainingFrac - (1 - cfg.tp1Frac)) < 1e-9);
 
-  // Middle stage: a pullback holds — the post-TP1 trail is removed (2026-10-16);
-  // the remainder rides to TP2 / rejection / the undertaker.
-  r.q.valueLam = 30_000_000; await r.bot.positionTick();           // ratio 1.50 on the remaining basis
-  assert.equal(r.bot.positions.length, 1, 'middle-stage pullback must hold');
+  // Middle stage: a print above the TP1 fire level holds — the post-TP1 trail
+  // is removed (2026-10-16) and, since 2026-10-22, the TP1 guard owns any
+  // dip back under the fire gain (a sub-fire pullback would trim there,
+  // tp1guard.test.mjs); above it the remainder rides to TP2 / rejection /
+  // the undertaker.
+  r.q.valueLam = 36_000_000; await r.bot.positionTick();           // ratio 1.80 on the remaining basis — above the 1.70 TP1 fire print
+  assert.equal(r.bot.positions.length, 1, 'middle-stage print above the TP1 line must hold');
   assert.equal(r.bot.positions[0].tp2Done, false);
 
   // TP2: the gain on the remainder reaches cfg.tp2Pct — banks cfg.tp2Frac of the ORIGINAL position.

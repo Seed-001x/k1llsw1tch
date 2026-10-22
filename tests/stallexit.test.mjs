@@ -121,10 +121,16 @@ test('kill switch: STALL_EXIT=0 — no pending, no fire, and a carried pending i
 });
 
 test('middle stage is in scope: a post-TP1 remainder on a dead tape sells at the lapse', () => {
+  // The remainder holds at +30% — ABOVE the TP1 fire line (+25%): since
+  // 2026-10-22 the TP1 guard (exits.js 3d-guard) owns the middle-stage
+  // give-back, so a remainder faded back under the line would trim/exit on
+  // the guard before the stall's confirm could lapse. The stall judges
+  // flow, not price, so the tape dies here while the price holds — and the
+  // stall remains the seller, exactly as this test has always pinned.
   const p = pos({ tp1Done: true, remainingFrac: 0.6 });
-  step(p, -20, cfg, NOW, DEAD);
+  step(p, 30, cfg, NOW, DEAD);
   assert.equal(p.stallPending, NOW);
-  const d = step(p, -20, cfg, NOW + 60 * S, DEAD);
+  const d = step(p, 30, cfg, NOW + 60 * S, DEAD);
   assert.equal(d.fraction, 1);
   assert.equal(d.reason, 'stall exit (dead flow, 60s confirm)');
 });

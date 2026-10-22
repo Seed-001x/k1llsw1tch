@@ -436,7 +436,7 @@ test('bot lifecycle: TP1 bank, TP2 bank and the final close each journal their w
     assert.equal(tp1.linkId, pos.id);
     assert.equal(tp1.holding, true);
 
-    r.q.valueLam = 30_000_000; await r.bot.positionTick(); await flush(); // middle-stage pullback: holds, no new records
+    r.q.valueLam = 36_000_000; await r.bot.positionTick(); await flush(); // middle-stage print ABOVE the TP1 fire level: holds, no new records (since 2026-10-22 the TP1 guard owns any dip back under the fire gain — a sub-fire pullback would trim there, tp1guard.test.mjs)
     assert.deepEqual(triggers(), ['entry', 'tp1']);
 
     r.q.valueLam = 44_000_000; await r.bot.positionTick(); await flush(); // TP2 banks

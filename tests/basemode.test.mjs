@@ -428,7 +428,12 @@ test('structural stop REMOVED: the rest of the exit stack still fires on the sam
 });
 
 test('structural stop REMOVED: post-TP1 and protected positions under the old low hold exactly as before', async () => {
-  const rig = pipelineRig();
+  // tp1Guard 0: guard pinned off because it owns the middle-stage give-back
+  // since 2026-10-22 and this test isolates the structural stop's removal —
+  // with the guard on, the post-TP1 leg's sub-entry print would exit on the
+  // guard floor instead of holding for the stop question (guard behavior:
+  // tp1guard.test.mjs).
+  const rig = pipelineRig({ cfgOver: { tp1Guard: 0 } });
   const pos = await openRangePosition(rig);
   pos.tp1Done = true;
   const { state, valueForMc } = driveMarks(rig, pos);

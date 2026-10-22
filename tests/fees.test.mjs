@@ -79,7 +79,7 @@ test('fees close: TP1 + TP2 + moonbag final counts every sell tx (buy + 3 sells)
   bot.latest.set('MINT1', view({ price: 1.0 }));
   q.valueLam = 34_000_000; clock.t += 10000; await bot.positionTick(); // ratio 1.70 — TP1 banks
   assert.equal(pos.tp1Done, true);
-  q.valueLam = 30_000_000; clock.t += 10000; await bot.positionTick(); // middle-stage pullback holds
+  q.valueLam = 36_000_000; clock.t += 10000; await bot.positionTick(); // middle-stage print above the TP1 fire level holds (since 2026-10-22 the TP1 guard owns any dip back under the fire gain — a sub-fire pullback would trim there and add a fourth sell tx, tp1guard.test.mjs)
   assert.equal(bot.positions.length, 1);
   q.valueLam = 44_000_000; clock.t += 10000; await bot.positionTick(); // ratio 2.20 on remainder — TP2 banks
   assert.equal(pos.tp2Done, true);

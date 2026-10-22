@@ -782,6 +782,15 @@ export function loadConfig(env = process.env) {
     tpTrailPct: num(env, 'TP_TRAIL_PCT', 0.25),           // DEAD KNOB: the post-TP1 middle trail (3d) is stripped in code (user order 2026-10-16) — read only by the disabled section
     tp2RejectZone: num(env, 'TP2_REJECT_ZONE', 0.80),     // middle stage: peak net gain at/above this = it reached for the TP2 mark (user 2026-10-13)
     tp2RejectDrop: num(env, 'TP2_REJECT_DROP', 0.10),     // ...and this far off that peak without converting = rejected → sell the remainder (zone 0 = off)
+    // TP1 GUARD (owner order 2026-10-22, exits.js section 3d-guard): the middle
+    // stage's give-back rule. Once TP1 banks, falling back to/below the level
+    // TP1 actually fired at trims half the remainder; the surviving slice
+    // exits in full at the floor (default: entry, net of fees). Founding
+    // case: MONEKO 2026-10-22 — TP1 banked +17%, TP2 (+80%) was never in
+    // reach, and the remainder rode to −70% before the owner hand-sold it.
+    tp1Guard: num(env, 'TP1_GUARD', 1),                   // 1 = on; 0 = the middle stage rides unguarded again
+    tp1GuardTrimFrac: num(env, 'TP1_GUARD_TRIM_FRAC', 0.5), // fraction OF THE REMAINDER sold at the TP1 cross-down
+    tp1GuardFloorPct: num(env, 'TP1_GUARD_FLOOR_PCT', 0),   // net gain at/below this = the remainder exits in full (0 = entry)
     // Two-path exit redesign (user 2026-10-15, variant c): at TP1 the position is classified by the
     // TP1 sell's realized gain — [modestMinPct, modestMaxPct] → MODEST: the remainder skips the middle
     // trail / generic trail and rides to the modestTargetPct split under the kill zone; above the band
@@ -986,6 +995,9 @@ export function validateConfig(cfg) {
   if (cfg.tpTrailPct < 0 || cfg.tpTrailPct >= 1) errs.push('TP_TRAIL_PCT must be between 0 and 1');
   if (cfg.tp2RejectZone < 0 || cfg.tp2RejectZone > 5) errs.push('TP2_REJECT_ZONE must be between 0 and 5');
   if (cfg.tp2RejectDrop < 0 || cfg.tp2RejectDrop >= 0.9) errs.push('TP2_REJECT_DROP must be between 0 and 0.9');
+  if (cfg.tp1Guard < 0 || cfg.tp1Guard > 1) errs.push('TP1_GUARD must be 0 or 1');
+  if (cfg.tp1GuardTrimFrac <= 0 || cfg.tp1GuardTrimFrac >= 1) errs.push('TP1_GUARD_TRIM_FRAC must be between 0 and 1');
+  if (cfg.tp1GuardFloorPct < -0.5 || cfg.tp1GuardFloorPct > 1) errs.push('TP1_GUARD_FLOOR_PCT must be between -0.5 and 1');
   if (cfg.modestMinPct < 0 || cfg.modestMinPct >= 1) errs.push('MODEST_MIN_PCT must be between 0 and 1');
   if (cfg.modestMaxPct < cfg.modestMinPct || cfg.modestMaxPct >= 2) errs.push('MODEST_MAX_PCT must be >= MODEST_MIN_PCT and below 2');
   if (cfg.modestTargetPct < 0 || cfg.modestTargetPct > 5) errs.push('MODEST_TARGET_PCT must be between 0 and 5 (0 = off)');

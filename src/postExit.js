@@ -175,6 +175,8 @@ export class PairedShadowExits {
         if ('bagDeadWaves' in d) s.bagDeadWaves = d.bagDeadWaves;
         if ('bagDeadHot' in d) s.bagDeadHot = d.bagDeadHot;
         if ('tp1Arm' in d) s.tp1Arm = d.tp1Arm;
+        if ('tp1FireGain' in d) s.tp1FireGain = d.tp1FireGain;
+        if ('tp1GuardTrimmed' in d) s.tp1GuardTrimmed = d.tp1GuardTrimmed;
         if (!(d.fraction > 0)) continue;
         s.realizedSol += d.fraction * valueSol;
         s.sells++;

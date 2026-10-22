@@ -87,11 +87,17 @@ test('(c) dead tape but only -5% (above the arm line): no exit — price arms, t
   assert.ok(ds.every(d => !fired(d)));
 });
 
-test('(d) TP1-banked position under -10% on a dead tape: the rule does NOT fire (the middle owns it)', () => {
+test('(d) TP1-banked position under -10% on a dead tape: the dead-flow rule does NOT fire — the TP1 guard owns the middle and exits it (owner order 2026-10-22)', () => {
+  // 5c judges PRE-TP1 positions only, so it stays silent here exactly as
+  // before. What changed on 2026-10-22: the middle stage gained its own
+  // give-back rule (exits.js 3d-guard) — a remainder back at/below the
+  // guard floor (entry) exits in full on the guard, dead tape or not.
   const p = fresh({ tp1Done: true, remainingFrac: 0.4 });
   const ds = drive(p, seq(DEAD_R, DEAD_B));
-  assert.ok(ds.every(d => d.fraction === 0));
-  assert.ok(ds.every(d => !fired(d)));
+  assert.ok(ds.every(d => !fired(d)), '5c never fires on a TP1-banked position');
+  assert.ok(ds.every(d => !/^dead-flow exit/.test(d.reason || '')), 'no sell carries the dead-flow reason');
+  assert.equal(ds[0].fraction, 1, 'the guard exits the remainder in full once it is back at/below entry');
+  assert.match(ds[0].reason, /TP1 guard exit/);
 });
 
 test('(e) no tape data at all: no exit, however deep — missing tape fails toward holding', () => {

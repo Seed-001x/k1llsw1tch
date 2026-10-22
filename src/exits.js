@@ -126,6 +126,18 @@
 // moonbag stack (3c–3c3, its dead flow included), liquidity death (1),
 // the stall exit (5) and the bot-side death detector / no-quote
 // failsafe.
+//
+// TP1 GUARD (owner order 2026-10-22 ~05:30 EDT, "Fix and add it" —
+// founding case MONEKO, same morning): the middle stage gains ONE
+// price exit below the TP2 rejection zone, new section 3d-guard. Once
+// TP1 banks (its fire gain is stamped on the position by the TP1
+// sections), a fall back to/below that level sells half the remainder;
+// the surviving slice exits in full at the floor (default entry). The
+// trim-not-dump shape is deliberate: the 2026-10-16 ref case (a
+// seconds-long dip after a fade-fire, then a 2x run) is what a full
+// exit at the cross would keep costing. TP1_GUARD=0 restores the
+// unguarded middle stage exactly. Untouched: the TP ladder, TP2
+// rejection (which judges first), the moonbag stack, the stall exit.
 const STRIP = {
   stopFamily: true,
   stallProbation: true,
@@ -256,6 +268,14 @@ export function evaluateExit(pos, mark, cfg, now) {
   // pending survives restarts; a position opened before this build
   // carries none and starts unpended.
   let clipPending = pos.clipPending ?? null;
+  // TP1-guard state (owner order 2026-10-22, section 3d-guard): the net
+  // gain TP1 actually fired at — stamped by the TP1 sections below on the
+  // fire check itself — and whether the guard's one trim has already
+  // sold. Persisted by the caller with the rest of the exit state; a
+  // position that banked TP1 before this build carries no stamp and the
+  // guard judges it against the plain tp1Pct arm line.
+  let tp1FireGain = pos.tp1FireGain ?? null;
+  let tp1GuardTrimmed = !!pos.tp1GuardTrimmed;
   // Scope, enforced here so no section below has to re-check it: the rule
   // exists only while its switch is on and the position is pre-moonbag —
   // reaching TP2 (or flipping STALL_EXIT off) drops any carried pending,
@@ -396,7 +416,7 @@ export function evaluateExit(pos, mark, cfg, now) {
   // section 4b), so no clock that matured during the takeover can fire. Takeover
   // supersedes protect: with both flags set, this return wins and nothing judges.
   const taken = !!pos.takenOver;
-  const out = (fraction, reason) => ({ fraction, reason, newPeak: peakRatio, newPeakMove: peakMove, ratio, stallSince: null, stopArmedTs, floorChecks, floorSince, probationSince, tp1Arm, moveHist, exitPending, exitConfirmEvents, protectedBlock, killZone, postTp1PeakMove, killzoneEvents, deadflowArmed, deadflowEvents, stallPending, stallEvents, clipPending, deadLossEvents, bagDeadWaves, bagDeadHot, bagTrailSince, bagFloorSince, bagTp2Ratio, bagTrimDone });
+  const out = (fraction, reason) => ({ fraction, reason, newPeak: peakRatio, newPeakMove: peakMove, ratio, stallSince: null, stopArmedTs, floorChecks, floorSince, probationSince, tp1Arm, moveHist, exitPending, exitConfirmEvents, protectedBlock, killZone, postTp1PeakMove, killzoneEvents, deadflowArmed, deadflowEvents, stallPending, stallEvents, clipPending, deadLossEvents, bagDeadWaves, bagDeadHot, bagTrailSince, bagFloorSince, bagTp2Ratio, bagTrimDone, tp1FireGain, tp1GuardTrimmed });
   if (taken) {
     stopArmedTs = null; floorChecks = 0; floorSince = null; probationSince = null; tp1Arm = null; stallPending = null; clipPending = null; bagDeadHot = false; bagTrailSince = null; bagFloorSince = null;
     if (exitPending != null) exitPending = {};
@@ -503,6 +523,7 @@ export function evaluateExit(pos, mark, cfg, now) {
       if (gain >= pos.tp1AtPct) {
         const pathClass = gain > cfg.modestMaxPct ? 'ladder' : (gain >= cfg.modestMinPct ? 'modest' : 'ladder');
         const killZoneOverlay = gain < cfg.modestMinPct;
+        tp1FireGain = gain; // the TP1 guard's line (3d-guard): the level this bank fired at
         return { ...out(cfg.tp1Frac, `TP1 +${Math.round(pos.tp1AtPct * 100)}% (override)`), tp1: true, tp1Arm: null, pathClass, killZoneOverlay };
       }
       // below the override line: nothing TP1-related arms or fires this check
@@ -521,6 +542,7 @@ export function evaluateExit(pos, mark, cfg, now) {
           // for bot.js to persist on the position and journal on this sell + the close.
           const pathClass = gain > cfg.modestMaxPct ? 'ladder' : (gain >= cfg.modestMinPct ? 'modest' : 'ladder');
           const killZoneOverlay = gain < cfg.modestMinPct;
+          tp1FireGain = gain; // the TP1 guard's line (3d-guard): the level this bank fired at
           return { ...out(cfg.tp1Frac, `TP1 +${(gain * 100).toFixed(0)}% (adaptive: ${fire})`), tp1: true, tp1Arm: null, pathClass, killZoneOverlay };
         }
       }
@@ -754,6 +776,27 @@ export function evaluateExit(pos, mark, cfg, now) {
   //     that peak is a rejection, not a pullback — sell the remainder instead of riding the wide
   //     trail down (wizardcat: peaked +80% net, rode the 25% trail out at +34%).
   if (!modestActive && pos.tp1Done && !pos.tp2Done && cfg.tp2RejectZone > 0 && peakGain >= cfg.tp2RejectZone && ratio <= peakRatio * (1 - cfg.tp2RejectDrop)) return out(1, `TP2 rejection (peak +${(peakGain * 100).toFixed(0)}%, now ${((ratio - 1) * 100).toFixed(1)}%)`);
+
+  // 3d-guard. TP1 GUARD (owner order 2026-10-22, "if it fails to reach 2nd
+  //     tp and drops below the first tp then it should get out fully or at
+  //     least sell another 50% of its remaining bag"): the middle stage's
+  //     give-back rule — the one price exit the stage has below the TP2
+  //     rejection zone. TP1 banking proved the entry; falling back through
+  //     the level TP1 fired at un-proves it. The first cross-down sells
+  //     tp1GuardTrimFrac OF THE REMAINDER — a shakeout costs half the bag,
+  //     not all of it (the ref lesson that killed the middle trail) — and
+  //     the surviving slice exits in full at the floor (default: entry,
+  //     net of fees, judged on gain like every profit-side rule here). A
+  //     gap straight through both lines exits in full on the floor with
+  //     no trim first. Judges only its own stage: pre-TP1 belongs to the
+  //     clip/stall, post-TP2 to the moonbag rules. Founding case: MONEKO
+  //     2026-10-22 — TP1 banked +17% adaptive, peak +45% never threatened
+  //     TP2 (+80%), the remainder rode to −70% and the owner hand-sold it.
+  if (cfg.tp1Guard > 0 && !modestActive && pos.tp1Done && !pos.tp2Done && !pos.noTp) {
+    if (gain <= cfg.tp1GuardFloorPct) return out(1, `TP1 guard exit (remainder back at ${cfg.tp1GuardFloorPct === 0 ? 'entry' : `${(cfg.tp1GuardFloorPct * 100).toFixed(0)}%`} after TP1 banked)`);
+    const tp1Line = tp1FireGain != null ? tp1FireGain : cfg.tp1Pct;
+    if (!tp1GuardTrimmed && gain <= tp1Line) { tp1GuardTrimmed = true; return out(cfg.tp1GuardTrimFrac, `TP1 guard trim (back under TP1 +${(tp1Line * 100).toFixed(0)}% — sold ${(cfg.tp1GuardTrimFrac * 100).toFixed(0)}% of the remainder)`); }
+  }
 
   // 3d. post-TP1 trail — STRIP (postTp1Trail): disabled in code, can never fire
   //     (removed by user order 2026-10-16 — see the header note). The section is

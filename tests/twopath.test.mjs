@@ -27,7 +27,7 @@ const S = 1000;
 // 2026-10-16: the post-TP1 middle trail (3d) was REMOVED by user order (STRIP
 // postTp1Trail) — the prints below that it used to own now HOLD, and several
 // tests pin exactly that.
-const cfg = testCfg({ txFeeSol: 0, tp1Pct: 0.10, tp1AdaptMax: 0.60, tp1Giveback: 0.08, tp1Frac: 0.4, tp2Pct: 0.80, exitConfirmSec: 10, stallProbationSec: 0, lockKeep: 0, dipStopPct: 0, bagTrailConfirmSec: 0, bagSmallHold: 0 }); // trail timer off here: the overlay test pins the trail owning the bag, the timer is pinned in bagtrailconfirm.test.mjs; bagSmallHold 0: the trail lives in the closeted big-bag mode since 2026-10-17 ~04:38
+const cfg = testCfg({ txFeeSol: 0, tp1Pct: 0.10, tp1AdaptMax: 0.60, tp1Giveback: 0.08, tp1Frac: 0.4, tp2Pct: 0.80, exitConfirmSec: 10, stallProbationSec: 0, lockKeep: 0, dipStopPct: 0, bagTrailConfirmSec: 0, bagSmallHold: 0, tp1Guard: 0 }); // trail timer off here: the overlay test pins the trail owning the bag, the timer is pinned in bagtrailconfirm.test.mjs; bagSmallHold 0: the trail lives in the closeted big-bag mode since 2026-10-17 ~04:38; tp1Guard 0: guard pinned off because it owns the middle-stage give-back since 2026-10-22 and this suite isolates the two-path family (guard behavior: tp1guard.test.mjs)
 const mark = (pos, ratio, o = {}) => ({ valueSol: pos.entrySol * pos.remainingFrac * ratio, liqUsd: 200_000, buysM5: 30, sellsM5: 10, solUsd: 150, volH1: 0, ...o });
 // thread the caller-persisted state from a decision back into the fixture, as bot.js does
 const thread = (p, d) => {

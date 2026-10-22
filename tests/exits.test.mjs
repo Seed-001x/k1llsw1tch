@@ -16,8 +16,11 @@ import { testCfg } from './helpers.mjs';
 // shared cfg switches it off (entryClip: 0) — its own behavior is pinned in
 // entryclip.test.mjs; with it on, every deep-red print below would sell as a
 // clip instead of holding, which is the clip working, not a stripped rule
-// firing.
-const cfg = testCfg({ stallProbationSec: 0, bagTrailConfirmSec: 0, entryClip: 0 }); const NOW = 1_000_000_000_000; // trail timer off here: this file pins the trail's line, the timer itself is pinned in bagtrailconfirm.test.mjs
+// firing. The TP1 GUARD (owner order 2026-10-22, exits.js 3d-guard) is
+// pinned off the same way (tp1Guard: 0): it owns the middle-stage give-back
+// since 2026-10-22, and this suite isolates the stripped rules — its own
+// behavior is pinned in tp1guard.test.mjs.
+const cfg = testCfg({ stallProbationSec: 0, bagTrailConfirmSec: 0, entryClip: 0, tp1Guard: 0 }); const NOW = 1_000_000_000_000; // trail timer off here: this file pins the trail's line, the timer itself is pinned in bagtrailconfirm.test.mjs
 const pos = (o = {}) => ({ entrySol: 0.02, remainingFrac: 1, peakRatio: 1, tp1Done: false, entryTs: NOW - 5 * 60000, ...o });
 const mark = (valueSol, o = {}) => ({ valueSol, liqUsd: 200_000, buysM5: 30, sellsM5: 10, solUsd: 150, ...o });
 

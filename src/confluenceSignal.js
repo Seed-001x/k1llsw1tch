@@ -346,6 +346,8 @@ export class ConfluenceSignal {
           if ('moveHist' in d) s.moveHist = d.moveHist;
           if ('exitPending' in d) s.exitPending = d.exitPending;
           if ('tp1Arm' in d) s.tp1Arm = d.tp1Arm;
+          if ('tp1FireGain' in d) s.tp1FireGain = d.tp1FireGain;
+          if ('tp1GuardTrimmed' in d) s.tp1GuardTrimmed = d.tp1GuardTrimmed;
           if ('killZone' in d) s.killZone = d.killZone;
           if ('postTp1PeakMove' in d) s.postTp1PeakMove = d.postTp1PeakMove;
           if ('deadflowArmed' in d) s.deadflowArmed = d.deadflowArmed;

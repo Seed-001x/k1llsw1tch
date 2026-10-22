@@ -41,9 +41,13 @@ function rig(cfgOver = {}, rugRef = { rug: healthyRug }) {
 const approx = (a, b, tol = 1e-6) => Math.abs(a - b) <= tol;
 
 // ------------------------------------------------------------ tracker unit
-test('shadow trades: TP1 bank, post-TP1 fade holds (trail removed), TP2 + moonbag exit completes with coherent P&L math', () => {
+test('shadow trades: TP1 bank, post-TP1 fade trims at the TP1 guard, TP2 + moonbag exit completes with coherent P&L math', () => {
   const dir = tmp();
-  const cfg = testCfg({ txFeeSol: 0.001, tp1Pct: 0.25, tp1Frac: 0.4, tp1AdaptMax: 0.60, tp1Giveback: 0.08, bagTrailConfirmSec: 0, bagSmallHold: 0 }); // trail timer off: this test pins the line's fire (timer: bagtrailconfirm.test.mjs); bagSmallHold 0: the trail lives in the closeted big-bag mode since 2026-10-17 ~04:38
+  // tp2Frac 0.2 (not the 0.35 default): the guard trim below leaves 0.30 of
+  // the original, and TP2 sells tp2Frac OF THE ORIGINAL — at 0.35 the TP2
+  // slice would consume the whole post-trim remainder and no moonbag could
+  // survive it. 0.2 keeps the ladder's shape: bank, trim, bank, bag.
+  const cfg = testCfg({ txFeeSol: 0.001, tp1Pct: 0.25, tp1Frac: 0.4, tp1AdaptMax: 0.60, tp1Giveback: 0.08, tp2Frac: 0.2, bagTrailConfirmSec: 0, bagSmallHold: 0 }); // trail timer off: this test pins the line's fire (timer: bagtrailconfirm.test.mjs); bagSmallHold 0: the trail lives in the closeted big-bag mode since 2026-10-17 ~04:38
   const tr = new ShadowTrades(dir, () => T0, { txFeeSol: cfg.txFeeSol });
   assert.equal(tr.open({ id: 'sig1', mint: 'MINT1', symbol: 'TEST', setup: 'trend', price: 2, mc: 500000, ts: T0, sizeSol: 0.05 }), true);
   let price = 2;
@@ -58,34 +62,45 @@ test('shadow trades: TP1 bank, post-TP1 fade holds (trail removed), TP2 + moonba
   assert.equal(mid.legs[0].frac, 0.4);
   assert.ok(approx(mid.realizedSol, 0.034), `banked ${mid.realizedSol}`); // 0.4 × (0.05 × 1.70)
 
-  price = 2.40; // ratio 1.20 vs peak 1.70 → the old post-TP1 trail print: since the
-  // trail's removal (2026-10-16) the middle-stage remainder HOLDS through the fade
+  price = 2.40; // ratio 1.20 vs peak 1.70 → the old post-TP1 trail print. The
+  // trail is gone (2026-10-16), but since 2026-10-22 the TP1 GUARD owns this
+  // fade (exits.js 3d-guard): the gain (+10% net) is back under the TP1 line
+  // yet above the entry floor, so the guard trims 50% OF THE REMAINDER and
+  // the surviving slice rides on.
   tr.tick(viewOf, T0 + 60000, cfg, 150);
-  assert.equal(tr.pending.size, 1, 'the fade no longer exits the shadow position');
+  const midT = tr.pending.get('sig1');
+  assert.ok(midT, 'position still open after the guard trim');
   assert.equal(tr.done.length, 0);
+  assert.ok(approx(midT.remainingFrac, 0.3), `remainingFrac ${midT.remainingFrac}`); // 0.6 × (1 − 0.5 trim)
+  assert.equal(midT.legs.length, 2);
+  assert.equal(midT.legs[1].frac, 0.5);
+  assert.match(midT.legs[1].reason, /TP1 guard trim/);
+  assert.ok(approx(midT.legs[1].proceedsSol, 0.018), `trim proceeds ${midT.legs[1].proceedsSol}`); // 0.5 × (0.05 × 0.6 × 1.20)
+  assert.ok(approx(midT.realizedSol, 0.052), `banked ${midT.realizedSol}`); // 0.034 + 0.018
 
-  price = 4.40; // ratio 2.20: gain on the remainder clears TP2 (+100%) → second bank
+  price = 4.60; // ratio 2.30: gain on the remainder clears TP2 (+100%) → second bank
   tr.tick(viewOf, T0 + 90000, cfg, 150);
   const mid2 = tr.pending.get('sig1');
   assert.ok(mid2, 'position still open after the TP2 bank');
-  assert.ok(approx(mid2.remainingFrac, 0.25), `remainingFrac ${mid2.remainingFrac}`); // 0.6 − 0.35 of original
-  assert.equal(mid2.legs.length, 2);
+  assert.ok(approx(mid2.remainingFrac, 0.1), `remainingFrac ${mid2.remainingFrac}`); // 0.3 − 0.2 of original
+  assert.equal(mid2.legs.length, 3);
 
-  price = 3.60; // ratio 1.80 vs peak 2.20 → past the moonbag trail (15% off peak) → full exit
+  price = 3.80; // ratio 1.90 vs peak 2.30 → past the moonbag trail (15% off peak) → full exit
   tr.tick(viewOf, T0 + 120000, cfg, 150);
   assert.equal(tr.pending.size, 0);
   assert.equal(tr.done.length, 1);
   const rec = tr.done[0];
   assert.equal(rec.status, 'exited');
   assert.match(rec.exitReason, /moonbag trail/);
-  assert.equal(rec.legs.length, 3, 'TP1 leg + TP2 leg + final leg');
-  assert.equal(rec.legs[2].frac, 1);
-  // proceeds = 0.034 (TP1 at 1.70×) + 0.0385 (TP2: 0.35 of original at 2.20×) + 0.0225
-  // (bag: 0.25 of original at 1.80×) = 0.095; fees = 0.001 × (1 buy + 3 sells)
-  assert.ok(approx(rec.proceedsSol, 0.095), `proceeds ${rec.proceedsSol}`);
-  assert.ok(approx(rec.pnlSol, 0.041), `pnl ${rec.pnlSol}`);
-  assert.ok(approx(rec.pnlPct, 82), `pnlPct ${rec.pnlPct}`);
-  assert.ok(approx(rec.peakRatio, 2.20), `peak ${rec.peakRatio}`);
+  assert.equal(rec.legs.length, 4, 'TP1 leg + guard trim leg + TP2 leg + final leg');
+  assert.equal(rec.legs[3].frac, 1);
+  // proceeds = 0.034 (TP1 at 1.70×) + 0.018 (guard trim: half the 0.6
+  // remainder at 1.20×) + 0.023 (TP2: 0.2 of original at 2.30×) + 0.0095
+  // (bag: 0.1 of original at 1.90×) = 0.0845; fees = 0.001 × (1 buy + 4 sells)
+  assert.ok(approx(rec.proceedsSol, 0.0845), `proceeds ${rec.proceedsSol}`);
+  assert.ok(approx(rec.pnlSol, 0.0295), `pnl ${rec.pnlSol}`);
+  assert.ok(approx(rec.pnlPct, 59), `pnlPct ${rec.pnlPct}`);
+  assert.ok(approx(rec.peakRatio, 2.30), `peak ${rec.peakRatio}`);
   assert.equal(rec.pnlBasis, 'viewQuote');
   assert.equal(rec.markCadenceSec, 30, 'marks 30s apart — the cadence approximation is on the record');
   assert.equal(rec.heldMin, 2);
@@ -93,7 +108,7 @@ test('shadow trades: TP1 bank, post-TP1 fade holds (trail removed), TP2 + moonba
   assert.equal(rec.entryMc, 500000);
   const totals = tr.totalsView();
   assert.deepEqual([totals.opened, totals.completed, totals.wins], [1, 1, 1]);
-  assert.ok(approx(totals.netPnlSol, 0.041));
+  assert.ok(approx(totals.netPnlSol, 0.0295));
   // persistence: the completed record is on disk; the pending file is drained
   const lines = fs.readFileSync(path.join(dir, 'virtual_trades.jsonl'), 'utf8').trim().split('\n');
   assert.equal(lines.length, 1);

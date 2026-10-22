@@ -179,7 +179,14 @@ test('confluence signal: SCALP holds below the +20% net line and exits WHOLE at 
 
 test('confluence signal: LADDER runs the real stack — TP1 banks a fraction, the stall exit closes the rest', () => {
   const dir = tmp();
-  const c = cfg();
+  // tp1Guard 0: guard pinned off because it owns the middle-stage give-back
+  // since 2026-10-22 and this script isolates the stall exit as the closer —
+  // the scripted fade (to 0.45×) sits under the guard floor, so with the
+  // guard on the remainder would exit on it before the stall's confirm
+  // could lapse, and the stall-as-seller shape this test pins could not
+  // exist (guard behavior: tp1guard.test.mjs). Every assertion below is
+  // unchanged.
+  const c = cfg({ tp1Guard: 0 });
   const cs = new ConfluenceSignal({ cfg: c, dir, now: () => T0 + 240000 });
   cs.noteEvent(fireEv(), {});
   let price = 3.40; // ratio 1.70 → gain 0.64 clears the adaptive ceiling → TP1 fires

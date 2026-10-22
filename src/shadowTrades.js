@@ -170,6 +170,8 @@ export class ShadowTrades {
         if ('bagTp2Ratio' in d) s.bagTp2Ratio = d.bagTp2Ratio;
         if ('bagTrimDone' in d) s.bagTrimDone = d.bagTrimDone;
         if ('tp1Arm' in d) s.tp1Arm = d.tp1Arm;
+        if ('tp1FireGain' in d) s.tp1FireGain = d.tp1FireGain;
+        if ('tp1GuardTrimmed' in d) s.tp1GuardTrimmed = d.tp1GuardTrimmed;
         this._dirty = true;
         if (!(d.fraction > 0)) continue;
         mustSave = true;
