@@ -16,8 +16,8 @@ import assert from 'node:assert/strict';
 import { Bot } from '../src/bot.js';
 import { Executor } from '../src/exec.js';
 import { loadConfig, validateConfig } from '../src/config.js';
-import { fastBondVerdict } from '../src/gate.js';
-import { curveLifeFromPairs, curveLifeFromSigTimes } from '../src/sources.js';
+import { fastBondVerdict, burstBondVerdict } from '../src/gate.js';
+import { curveLifeFromPairs, curveLifeFromSigTimes, curveBurstFromSigTimes } from '../src/sources.js';
 import { SOL_MINT } from '../src/util.js';
 import { testCfg, view } from './helpers.mjs';
 
@@ -331,4 +331,52 @@ test('curveLifeFromSigTimes: complete window is the exact span; order and junk a
 test('curveLifeFromSigTimes: a truncated window speaks only when its span alone clears the line', () => {
   assert.equal(curveLifeFromSigTimes([1000, 1500], false, 180), 500, 'lower bound 500s >= 180s line: the true life is longer still — a sound pass measurement');
   assert.equal(curveLifeFromSigTimes([1000, 1100], false, 180), null, 'lower bound under the line proves nothing — unknown');
+});
+
+// --- Birth-burst clause (owner order 2026-10-21, the OA hole) -------------
+// OA's real curve history (blockTimes, seconds): creation at t, ELEVEN txs
+// inside the first 15 seconds, silence, then the graduation cluster at
+// t+506. Pair-age said "507s, safe"; the buying said insta-bond.
+const OA_TIMES = [0, 1, 1, 3, 5, 6, 8, 10, 11, 13, 15, 506, 506, 506, 506, 506, 506, 1040].map(x => 1_700_000_000 + x);
+
+test('curveBurstFromSigTimes: OA shape — most of the curve inside its first breath', () => {
+  const b = curveBurstFromSigTimes(OA_TIMES, 180, true);
+  assert.deepEqual(b, { total: 18, inWindow: 11, windowSec: 180 });
+  assert.equal(curveBurstFromSigTimes(OA_TIMES, 180, false), null, 'a truncated history loses the birth window — measures nothing');
+  assert.equal(curveBurstFromSigTimes([100, 200, 300], 180, true), null, 'too few txs to judge a shape');
+  const spread = Array.from({ length: 20 }, (_, i) => 1_700_000_000 + i * 120);
+  assert.equal(curveBurstFromSigTimes(spread, 180, true).inWindow, 2, 'an organic grind keeps its buys spread');
+});
+
+test('burstBondVerdict: blocks a birth burst, passes a spread, silent on darkness', () => {
+  const v = burstBondVerdict({ total: 18, inWindow: 11, windowSec: 180 }, { windowSec: 180, minFrac: 0.5 });
+  assert.equal(v.blocked, true);
+  assert.match(v.reason, /insta-bond burst: 11 of 18 curve txs landed within 180s/);
+  assert.equal(burstBondVerdict({ total: 20, inWindow: 2, windowSec: 180 }, { windowSec: 180, minFrac: 0.5 }).blocked, false);
+  assert.equal(burstBondVerdict({ total: 20, inWindow: 10, windowSec: 180 }, { windowSec: 180, minFrac: 0.5 }).blocked, true, 'exactly at the frac line blocks');
+  assert.equal(burstBondVerdict(null, { windowSec: 180, minFrac: 0.5 }).blocked, false, 'no measurement, no verdict');
+});
+
+test('burst seam: OA shape — measured 507s lifespan pass is overturned by the birth burst', async () => {
+  const rig = pipelineRig({ curveLife: 507 });
+  rig.bot.d.fetchCurveBurst = async () => ({ total: 18, inWindow: 11, windowSec: 180 });
+  const sig = await popFire(rig, { mint: 'MINTOA', symbol: 'OA' });
+  assert.equal(sig.decision, 'skipped');
+  assert.equal(sig.gates.fastBond.pass, false);
+  assert.equal(sig.gates.fastBond.burstBlocked, true);
+  assert.match(sig.gates.fastBond.reason, /insta-bond burst/);
+  assert.ok(rig.bot.birthVerdicts.get('MINTOA'), 'a burst block is a birth fact — remembered');
+});
+
+test('burst seam: spread curve and unmeasured burst both leave the lifespan pass standing', async () => {
+  const spread = pipelineRig({ curveLife: 507 });
+  spread.bot.d.fetchCurveBurst = async () => ({ total: 20, inWindow: 2, windowSec: 180 });
+  const sigA = await popFire(spread, { mint: 'MINTSPREAD', symbol: 'SPRD' });
+  assert.equal(sigA.gates.fastBond.pass, true);
+  assert.notEqual(sigA.decision, 'skipped');
+  const dark = pipelineRig({ curveLife: 507 });
+  dark.bot.d.fetchCurveBurst = async () => null;
+  const sigB = await popFire(dark, { mint: 'MINTDARK', symbol: 'DARK' });
+  assert.equal(sigB.gates.fastBond.pass, true);
+  assert.notEqual(sigB.decision, 'skipped');
 });

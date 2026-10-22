@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { History } from './history.js';
 import { detect, detectChurn, detectLiftoff, eligible, eligibleChecks, liqFamilyChecks, fastPop, fastPopFloors, judgeScan, closestCall, betterScanVerdict } from './detect.js';
-import { runGates, hasHardFail, tempRuleViolation, blockedNameWord, extensionCheck, freshHistoryCheck, flowSnapshotCheck, shallowDipCheck, summarizeGateChecks, holderSamples, foldLastTrades, insiderCountVerdict, fastBondVerdict, birthMemoryVerdict, topGuardVerdict } from './gate.js';
+import { runGates, hasHardFail, tempRuleViolation, blockedNameWord, extensionCheck, freshHistoryCheck, flowSnapshotCheck, shallowDipCheck, summarizeGateChecks, holderSamples, foldLastTrades, insiderCountVerdict, fastBondVerdict, burstBondVerdict, birthMemoryVerdict, topGuardVerdict } from './gate.js';
 import { computeSignalFields } from './signalFields.js';
 import { evaluateExit } from './exits.js';
 import { ShadowFlow, ratchetArmed, ratchetShadowFire } from './ratchetShadow.js';
@@ -2361,6 +2361,20 @@ export class Bot {
     return lifeSec;
   }
 
+  // Birth-burst stats for a mint (the OA fix): the shape of the curve's
+  // signature history, via the optional fetchCurveBurst dep. Cached like
+  // the lifespan — a mint's birth shape never changes. Null = unmeasured.
+  async _curveBurst(mint) {
+    this.curveBurstCache = this.curveBurstCache || new Map();
+    const hit = this.curveBurstCache.get(mint);
+    if (hit && (hit.burst != null || this.now() - hit.ts < 60000)) return hit.burst;
+    let burst = null;
+    if (this.d.fetchCurveBurst) { try { burst = await this.d.fetchCurveBurst(mint); } catch { burst = null; } }
+    if (!burst || !(burst.total > 0)) burst = null;
+    this.curveBurstCache.set(mint, { burst, ts: this.now() });
+    return burst;
+  }
+
   // Ran-rebuy verdict (user 2026-10-15): the already-ran rebuy check from
   // gate.js, reached through the optional ranRebuyCheck dep (wired in
   // index.js; absent in unit rigs → no verdict and the gate simply doesn't
@@ -4019,6 +4033,27 @@ export class Bot {
         console.log(`[fastbond] skip: ${v.symbol} — ${fb.reason}`);
         return this.skip(v, sig, [fb.reason], g.warnings, checks, g.pass);
       } else this.stats.fastBond.passed++;
+
+      // Birth-burst clause (owner order 2026-10-21, the OA hole): a
+      // MEASURED lifespan pass can still be a coin that insta-bonded at
+      // birth and merely graduated late — judge the SHAPE of the curve's
+      // own signature history before letting the pass stand. A burst
+      // block is a measured birth fact, so it is remembered exactly like
+      // a sub-line lifespan.
+      if (fb.pass && !fb.unknown && this.cfg.fastBondBurst) {
+        const bv = burstBondVerdict(await this._curveBurst(v.address), {
+          windowSec: this.cfg.fastBondBurstSec,
+          minFrac: this.cfg.fastBondBurstFrac,
+        });
+        if (bv.blocked) {
+          this.stats.fastBond.passed--; this.stats.fastBond.blocked++;
+          this.stats.fastBond.burstBlocked = (this.stats.fastBond.burstBlocked || 0) + 1;
+          checks.fastBond = { pass: false, curveLifeSec: fb.lifeSec, max: this.cfg.fastBondMaxSec, burstBlocked: true, reason: bv.reason };
+          this._recordBirthVerdict(v.address, 'fastBond', bv.reason);
+          console.log(`[fastbond] skip (burst): ${v.symbol} — ${bv.reason}`);
+          return this.skip(v, sig, [bv.reason], g.warnings, checks, g.pass);
+        }
+      }
     }
 
     // BASE MODE demotion (owner order 2026-10-16 23:00 EDT, "Build the

@@ -224,6 +224,41 @@ export function curveLifeFromSigTimes(times, complete, maxSec) {
   return span >= (Number(maxSec) || 0) && (Number(maxSec) || 0) > 0 ? span : null;
 }
 
+/** Birth-burst shape of a curve's signature history (owner order
+ *  2026-10-21, the OA hole): how many of the curve's txs landed within
+ *  `windowSec` of the FIRST one. A bought-out-at-birth curve shows most of
+ *  its lifetime traffic inside its first breath, however long graduation
+ *  lagged afterwards. Judged by gate.js burstBondVerdict. `complete` is
+ *  the same honesty rule as curveLifeFromSigTimes: a truncated history
+ *  (the 1000-signature page) loses the OLDEST txs — the birth window
+ *  itself — so an incomplete list measures nothing and returns null. */
+export function curveBurstFromSigTimes(times, windowSec, complete) {
+  if (!complete) return null;
+  const t = (Array.isArray(times) ? times : []).map(Number).filter(x => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
+  const w = Number(windowSec) || 0;
+  if (t.length < 4 || !(w > 0)) return null;
+  const inWindow = t.filter(x => x - t[0] <= w).length;
+  return { total: t.length, inWindow, windowSec: w };
+}
+
+/** Birth-burst stats from chain: ONE getSignaturesForAddress call against
+ *  the bonding-curve PDA (the fetchCurveLifeChain pattern), trying each
+ *  configured RPC in turn. Any failure resolves to null — the chain is a
+ *  witness, never a new way to invent a number. */
+export async function fetchCurveBurst(mint, cfg) {
+  if (!mint || !cfg || !cfg.rpcUrls || !cfg.rpcUrls.length) return null;
+  try {
+    const [{ rpc, PUMP_PROGRAM }, { PublicKey }] = await Promise.all([import('./curveChain.js'), import('@solana/web3.js')]);
+    const [curve] = PublicKey.findProgramAddressSync(
+      [Buffer.from('bonding-curve'), new PublicKey(mint).toBuffer()],
+      new PublicKey(PUMP_PROGRAM),
+    );
+    const sigs = await rpc(cfg.rpcUrls, 'getSignaturesForAddress', [curve.toBase58(), { limit: 1000 }], 9000);
+    if (!Array.isArray(sigs)) return null;
+    return curveBurstFromSigTimes(sigs.map(s => s && s.blockTime), cfg.fastBondBurstSec, sigs.length < 1000);
+  } catch { return null; }
+}
+
 /** Curve lifespan from chain when DexScreener's pair stamps are missing
  *  (owner order 2026-10-21, CYBERCAT: DS returned no usable curve stamp
  *  at the buy evaluation and the gate went blind). ONE getSignaturesForAddress

@@ -257,6 +257,27 @@ export function fastBondVerdict(lifeSec, maxSec, opts = {}) {
   return { pass: true, lifeSec: life, unknown: false, reason: `curve lived ${life}s — at or over the ${maxSec}s fast-bond line` };
 }
 
+/** Birth-burst verdict (owner order 2026-10-21, the OA hole): pair-age lies
+ *  about HOW a coin bonded. OA's curve pair "lived" 507s — but 11 of its 18
+ *  curve txs landed within 15 SECONDS of creation: the curve was bought out
+ *  at birth, sat full-but-ungraduated for 8 minutes, then got pushed over
+ *  the line. The lifespan judge read the graduation lag and passed a coin
+ *  that insta-bonded in every way that matters. This judge reads the SHAPE
+ *  of the curve's own signature history (sources.curveBurstFromSigTimes):
+ *  when at least `minFrac` of all curve txs landed within `windowSec` of
+ *  the first one, the bonding was a burst at birth — blocked, whatever the
+ *  graduation lag says. Only ever consulted on a MEASURED lifespan pass;
+ *  missing/truncated signature history judges nothing (returns unblocked). */
+export function burstBondVerdict(burst, opts = {}) {
+  if (!burst || !(burst.total > 0) || burst.inWindow == null) return { blocked: false };
+  const minFrac = Number(opts.minFrac) || 0;
+  const frac = burst.inWindow / burst.total;
+  if (minFrac > 0 && frac >= minFrac) {
+    return { blocked: true, frac, reason: `insta-bond burst: ${burst.inWindow} of ${burst.total} curve txs landed within ${opts.windowSec}s of creation — curve bought out at birth (graduation only lagged)` };
+  }
+  return { blocked: false, frac };
+}
+
 // 4d. Birth-verdict memory (owner order 2026-10-16, the FMR hole): both birth
 // gates above FAIL OPEN on missing data — correct in isolation, fatal in
 // combination with amnesia. FMR (2026-10-16): a trend evaluation measured

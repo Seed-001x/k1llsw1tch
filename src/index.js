@@ -3,7 +3,7 @@ import { SETTINGS_KEYS, loadSettingsOverlay, applySettings } from './settings.js
 import { Executor } from './exec.js';
 import { Bot } from './bot.js';
 import { startServer } from './server.js';
-import { discover, fetchViews, fetchSolUsd, fetchCurve, fetchCurveLife } from './sources.js';
+import { discover, fetchViews, fetchSolUsd, fetchCurve, fetchCurveLife, fetchCurveBurst } from './sources.js';
 import { fetchRug, fetchHolderCount, ranRebuyCheck } from './gate.js';
 
 const cfg = loadConfig();
@@ -21,7 +21,7 @@ const settingsApplied = applySettings(cfg, settingsOverlay);
 if (settingsApplied.length) console.log(`[edgebot] settings overlay applied over env (${settingsApplied.length}): ${settingsApplied.join(', ')}`);
 
 const exec = new Executor(cfg);
-const bot = new Bot(cfg, { discover, fetchViews, fetchSolUsd, fetchRug, fetchCurve: (mint) => fetchCurve(mint, cfg), fetchCurveLife: (mint) => fetchCurveLife(mint, cfg), fetchHolderCount: (mint) => fetchHolderCount(mint, { rpcUrls: cfg.rpcUrls }), ranRebuyCheck, exec, settingsBaseline, settingsOverlay });
+const bot = new Bot(cfg, { discover, fetchViews, fetchSolUsd, fetchRug, fetchCurve: (mint) => fetchCurve(mint, cfg), fetchCurveLife: (mint) => fetchCurveLife(mint, cfg), fetchCurveBurst: (mint) => fetchCurveBurst(mint, cfg), fetchHolderCount: (mint) => fetchHolderCount(mint, { rpcUrls: cfg.rpcUrls }), ranRebuyCheck, exec, settingsBaseline, settingsOverlay });
 
 console.log(`[edgebot] mode=${cfg.realMode ? 'REAL' : 'SHADOW'}${cfg.modeWarning ? '  (' + cfg.modeWarning + ')' : ''}`);
 console.log(`[edgebot] limits: ${cfg.tradeSol} SOL/trade, ${cfg.maxPositions} positions, daily loss cap ${cfg.dailyLossSol} SOL, kill at <${cfg.killEquityFrac * 100}% equity`);
