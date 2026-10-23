@@ -822,12 +822,14 @@ export function loadConfig(env = process.env) {
     tp2RejectDrop: num(env, 'TP2_REJECT_DROP', 0.10),     // ...and this far off that peak without converting = rejected → sell the remainder (zone 0 = off)
     // TP1 GUARD (owner order 2026-10-22, exits.js section 3d-guard): the middle
     // stage's give-back rule. Once TP1 banks, falling back to/below the level
-    // TP1 actually fired at trims half the remainder; the surviving slice
-    // exits in full at the floor (default: entry, net of fees). Founding
-    // case: MONEKO 2026-10-22 — TP1 banked +17%, TP2 (+80%) was never in
-    // reach, and the remainder rode to −70% before the owner hand-sold it.
+    // TP1 actually fired at exits the WHOLE remainder in one clip (owner
+    // amendment 2026-10-23 — the original half-trim still rode banked profits
+    // down to the floor). The floor (default: entry, net of fees) judges
+    // first for gaps straight past the line. Founding case: MONEKO
+    // 2026-10-22 — TP1 banked +17%, TP2 (+80%) was never in reach, and the
+    // remainder rode to −70% before the owner hand-sold it.
     tp1Guard: num(env, 'TP1_GUARD', 1),                   // 1 = on; 0 = the middle stage rides unguarded again
-    tp1GuardTrimFrac: num(env, 'TP1_GUARD_TRIM_FRAC', 0.5), // fraction OF THE REMAINDER sold at the TP1 cross-down
+    tp1GuardTrimFrac: num(env, 'TP1_GUARD_TRIM_FRAC', 0.5), // DEAD KNOB (2026-10-23): the cross-down exits in full now — read by nothing, kept for rollback
     tp1GuardFloorPct: num(env, 'TP1_GUARD_FLOOR_PCT', 0),   // net gain at/below this = the remainder exits in full (0 = entry)
     // Two-path exit redesign (user 2026-10-15, variant c): at TP1 the position is classified by the
     // TP1 sell's realized gain — [modestMinPct, modestMaxPct] → MODEST: the remainder skips the middle

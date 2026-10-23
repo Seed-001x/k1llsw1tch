@@ -131,13 +131,14 @@
 // founding case MONEKO, same morning): the middle stage gains ONE
 // price exit below the TP2 rejection zone, new section 3d-guard. Once
 // TP1 banks (its fire gain is stamped on the position by the TP1
-// sections), a fall back to/below that level sells half the remainder;
-// the surviving slice exits in full at the floor (default entry). The
-// trim-not-dump shape is deliberate: the 2026-10-16 ref case (a
-// seconds-long dip after a fade-fire, then a 2x run) is what a full
-// exit at the cross would keep costing. TP1_GUARD=0 restores the
-// unguarded middle stage exactly. Untouched: the TP ladder, TP2
-// rejection (which judges first), the moonbag stack, the stall exit.
+// sections), a fall back to/below that level exits the WHOLE remainder
+// (owner amendment 2026-10-23: the original half-trim + floor-slice
+// shape still rode banked profits down — "instead of riding the
+// profits down... just clip full out"). The floor branch (default
+// entry) remains for a gap straight past the line. TP1_GUARD=0
+// restores the unguarded middle stage exactly. Untouched: the TP
+// ladder, TP2 rejection (which judges first), the moonbag stack, the
+// stall exit.
 const STRIP = {
   stopFamily: true,
   stallProbation: true,
@@ -270,10 +271,13 @@ export function evaluateExit(pos, mark, cfg, now) {
   let clipPending = pos.clipPending ?? null;
   // TP1-guard state (owner order 2026-10-22, section 3d-guard): the net
   // gain TP1 actually fired at — stamped by the TP1 sections below on the
-  // fire check itself — and whether the guard's one trim has already
-  // sold. Persisted by the caller with the rest of the exit state; a
-  // position that banked TP1 before this build carries no stamp and the
-  // guard judges it against the plain tp1Pct arm line.
+  // fire check itself. Persisted by the caller with the rest of the exit
+  // state; a position that banked TP1 before this build carries no stamp
+  // and the guard judges it against the plain tp1Pct arm line.
+  // tp1GuardTrimmed is legacy state from the guard's original trim shape
+  // (superseded 2026-10-23 by the full exit): it still round-trips through
+  // the decision so pre-change positions and their consumers keep it, but
+  // nothing sets or reads it anymore.
   let tp1FireGain = pos.tp1FireGain ?? null;
   let tp1GuardTrimmed = !!pos.tp1GuardTrimmed;
   // Scope, enforced here so no section below has to re-check it: the rule
@@ -779,23 +783,28 @@ export function evaluateExit(pos, mark, cfg, now) {
 
   // 3d-guard. TP1 GUARD (owner order 2026-10-22, "if it fails to reach 2nd
   //     tp and drops below the first tp then it should get out fully or at
-  //     least sell another 50% of its remaining bag"): the middle stage's
-  //     give-back rule — the one price exit the stage has below the TP2
-  //     rejection zone. TP1 banking proved the entry; falling back through
-  //     the level TP1 fired at un-proves it. The first cross-down sells
-  //     tp1GuardTrimFrac OF THE REMAINDER — a shakeout costs half the bag,
-  //     not all of it (the ref lesson that killed the middle trail) — and
-  //     the surviving slice exits in full at the floor (default: entry,
-  //     net of fees, judged on gain like every profit-side rule here). A
-  //     gap straight through both lines exits in full on the floor with
-  //     no trim first. Judges only its own stage: pre-TP1 belongs to the
-  //     clip/stall, post-TP2 to the moonbag rules. Founding case: MONEKO
-  //     2026-10-22 — TP1 banked +17% adaptive, peak +45% never threatened
-  //     TP2 (+80%), the remainder rode to −70% and the owner hand-sold it.
+  //     least sell another 50% of its remaining bag"; AMENDED owner order
+  //     2026-10-23, "instead of riding the profits down after being above
+  //     the average entry we just clip full out if we see that the floor is
+  //     retracing"): the middle stage's give-back rule — the one price exit
+  //     the stage has below the TP2 rejection zone. TP1 banking proved the
+  //     entry; falling back through the level TP1 fired at un-proves it, so
+  //     the cross-down now exits the WHOLE remainder in one clip. The
+  //     original shape (trim half at the cross, last slice out at the
+  //     floor) still rode banked gains down between the line and entry —
+  //     the exact bleed the amendment kills; the 2026-10-16 shakeout
+  //     concern behind the trim was weighed by the owner and overruled.
+  //     The floor (default: entry, net of fees, judged on gain like every
+  //     profit-side rule here) still judges first, so a gap straight past
+  //     the line exits on the floor's reason. Judges only its own stage:
+  //     pre-TP1 belongs to the clip/stall, post-TP2 to the moonbag rules.
+  //     Founding case: MONEKO 2026-10-22 — TP1 banked +17% adaptive, peak
+  //     +45% never threatened TP2 (+80%), the remainder rode to −70% and
+  //     the owner hand-sold it.
   if (cfg.tp1Guard > 0 && !modestActive && pos.tp1Done && !pos.tp2Done && !pos.noTp) {
     if (gain <= cfg.tp1GuardFloorPct) return out(1, `TP1 guard exit (remainder back at ${cfg.tp1GuardFloorPct === 0 ? 'entry' : `${(cfg.tp1GuardFloorPct * 100).toFixed(0)}%`} after TP1 banked)`);
     const tp1Line = tp1FireGain != null ? tp1FireGain : cfg.tp1Pct;
-    if (!tp1GuardTrimmed && gain <= tp1Line) { tp1GuardTrimmed = true; return out(cfg.tp1GuardTrimFrac, `TP1 guard trim (back under TP1 +${(tp1Line * 100).toFixed(0)}% — sold ${(cfg.tp1GuardTrimFrac * 100).toFixed(0)}% of the remainder)`); }
+    if (gain <= tp1Line) return out(1, `TP1 guard full exit (back under TP1 +${(tp1Line * 100).toFixed(0)}% after banking — whole remainder out)`);
   }
 
   // 3d. post-TP1 trail — STRIP (postTp1Trail): disabled in code, can never fire

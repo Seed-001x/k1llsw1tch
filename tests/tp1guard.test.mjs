@@ -1,11 +1,14 @@
 // TP1 GUARD (owner order 2026-10-22, exits.js section 3d-guard): the
 // middle stage's give-back rule. Once TP1 banks, its fire gain is stamped
-// on the position (tp1FireGain); a fall back to/below that line sells
-// TP1_GUARD_TRIM_FRAC of the remainder, once; the surviving slice exits
-// in full at TP1_GUARD_FLOOR_PCT (default 0 = entry, net of fees). A gap
-// straight through both lines exits in full without a trim. Founding
-// case: MONEKO 2026-10-22 — TP1 banked +17% adaptive, TP2 (+80%) never
-// in reach, remainder rode to −70% and the owner hand-sold it.
+// on the position (tp1FireGain); a fall back to/below that line exits
+// the WHOLE remainder in one clip (owner amendment 2026-10-23 — the
+// original shape trimmed TP1_GUARD_TRIM_FRAC once and let the surviving
+// slice ride to TP1_GUARD_FLOOR_PCT, default 0 = entry, net of fees;
+// that still rode banked profits down, so the trim is gone and the
+// frac knob is dead). A gap straight through both lines exits in full
+// on the floor's reason. Founding case: MONEKO 2026-10-22 — TP1 banked
+// +17% adaptive, TP2 (+80%) never in reach, remainder rode to −70% and
+// the owner hand-sold it.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateExit } from '../src/exits.js';
@@ -62,24 +65,20 @@ test('holding above the TP1 line: the guard is silent', () => {
   assert.equal(d.tp1GuardTrimmed, false);
 });
 
-test('cross-down through the TP1 line trims half the remainder, once', () => {
-  let p = mid();
-  let d = evaluateExit(p, mark(p, 1.17), cfg, NOW); // exactly back at the +17% line
-  assert.equal(d.fraction, 0.5);
-  assert.match(d.reason, /TP1 guard trim/);
-  assert.equal(d.tp1GuardTrimmed, true);
-  p = carry(p, d);
-  assert.equal(p.remainingFrac, 0.2); // 20% of the original rides on
-  // Still under the line but above the floor: no second trim, no exit.
-  d = evaluateExit(p, mark(p, 1.10), cfg, NOW + 4000);
-  assert.equal(d.fraction, 0);
+test('cross-down through the TP1 line exits the whole remainder in one clip', () => {
+  const p = mid();
+  const d = evaluateExit(p, mark(p, 1.17), cfg, NOW); // exactly back at the +17% line
+  assert.equal(d.fraction, 1);
+  assert.match(d.reason, /TP1 guard full exit/);
 });
 
-test('after the trim, reaching entry exits the last slice in full', () => {
-  let p = mid({ tp1GuardTrimmed: true, remainingFrac: 0.2 });
-  const d = evaluateExit(p, mark(p, 1.0), cfg, NOW);
+test('a legacy tp1GuardTrimmed stamp latches nothing: the line full-exits regardless', () => {
+  // Positions that banked under the pre-2026-10-23 trim shape carry the
+  // stamp; it must not gate or soften the full exit.
+  const p = mid({ tp1GuardTrimmed: true, remainingFrac: 0.2 });
+  const d = evaluateExit(p, mark(p, 1.10), cfg, NOW);
   assert.equal(d.fraction, 1);
-  assert.match(d.reason, /TP1 guard exit/);
+  assert.match(d.reason, /TP1 guard full exit/);
 });
 
 test('a gap straight through both lines exits in full, no trim first', () => {
@@ -92,8 +91,8 @@ test('a gap straight through both lines exits in full, no trim first', () => {
 test('no fire stamp (banked before this build): the line falls back to tp1Pct', () => {
   const p = mid({ tp1FireGain: null });
   const d = evaluateExit(p, mark(p, 1 + cfg.tp1Pct - 0.01), cfg, NOW);
-  assert.equal(d.fraction, 0.5);
-  assert.match(d.reason, /TP1 guard trim/);
+  assert.equal(d.fraction, 1);
+  assert.match(d.reason, /TP1 guard full exit/);
 });
 
 test('scope: pre-TP1 and post-TP2 positions are never the guard\u2019s', () => {

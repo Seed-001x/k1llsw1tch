@@ -64,7 +64,7 @@ export const SETTINGS_SCHEMA = [
   { key: 'tp2Pct', label: 'TP2 arm (gain fraction)', group: 'Exits', type: 'num', min: 0.05, max: 5, hint: '0.8 = +80%' },
   { key: 'tp2Frac', label: 'TP2 bank fraction', group: 'Exits', type: 'num', min: 0, max: 1, hint: 'share of the ORIGINAL position; 0 = off' },
   { key: 'tp1Guard', label: 'TP1 guard (middle-stage give-back)', group: 'Exits', type: 'num', min: 0, max: 1, hint: '1 = on: falling back under the TP1 line trims the remainder' },
-  { key: 'tp1GuardTrimFrac', label: 'TP1 guard trim (fraction of remainder)', group: 'Exits', type: 'num', min: 0.05, max: 0.95, hint: '0.5 = sell half the remaining bag at the cross-down' },
+
   { key: 'tp1GuardFloorPct', label: 'TP1 guard floor (net gain)', group: 'Exits', type: 'num', min: -0.5, max: 1, hint: '0 = the last slice exits in full at entry' },
   { key: 'entryClipSec', label: 'Entry clip timer (sec)', group: 'Exits', type: 'int', min: 0, max: 3600 },
   { key: 'entryClipPct', label: 'Entry clip line (fraction)', group: 'Exits', type: 'num', min: 0, max: 0.9, hint: '0.07 = −7%' },
