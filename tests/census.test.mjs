@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { loadConfig } from '../src/config.js';
+import { loadConfig, validateConfig } from '../src/config.js';
 import { wsUrlFor, parseCensusTrade, newCensus, censusFold, censusWindow, censusStamp, CensusFeed } from '../src/census.js';
 
 const MINTER = '3NxfWMHmfQg8NJFW5AG1ti2xACdczWz24e9SKyk1pump'; // PumpSwap coin the buy/sell fixtures came from
@@ -157,5 +157,45 @@ test('feed: no RPC url = inert and honest about it', () => {
   feed.start();
   assert.equal(feed.stats.connected, false);
   assert.equal(feed.stats.lastError, 'no ws url');
+  feed.stop();
+});
+
+// ------------------------------------------------- endpoint override
+// CENSUS ENDPOINT OVERRIDE (owner order 2026-10-23, after the
+// 2026-10-22 blindness): the census socket derived its URL from
+// RPC_URLS[0] and nothing else, so a halted primary plan darkened the
+// whole deep-check layer for hours. CENSUS_RPC_URL gives the socket its
+// own endpoint; empty restores the historical derivation.
+test('config: CENSUS_RPC_URL defaults empty, passes through, junk fails validation', () => {
+  assert.equal(loadConfig({}).censusRpcUrl, '');
+  assert.equal(loadConfig({ CENSUS_RPC_URL: 'https://api.mainnet-beta.solana.com' }).censusRpcUrl, 'https://api.mainnet-beta.solana.com');
+  assert.ok(validateConfig(loadConfig({ CENSUS_RPC_URL: 'notaurl' })).some(e => e.includes('CENSUS_RPC_URL')));
+  assert.deepEqual(validateConfig(loadConfig({ CENSUS_RPC_URL: 'wss://example.com' })), []);
+});
+
+test('feed: the override wins over RPC_URLS[0] and the stats stamp the endpoint host only', () => {
+  FakeWS.instances = [];
+  const feed = new CensusFeed({
+    rpcUrls: ['https://mainnet.helius-rpc.com/?api-key=<redacted>'],
+    rpcUrl: 'https://api.mainnet-beta.solana.com',
+    rpcFn: async () => null,
+    wsImpl: FakeWS,
+  });
+  feed.start();
+  assert.equal(FakeWS.instances[0].url, 'wss://api.mainnet-beta.solana.com');
+  assert.equal(feed.stats.endpoint, 'api.mainnet-beta.solana.com');
+  feed.stop();
+});
+
+test('feed: without the override the socket derives from RPC_URLS[0] exactly as before', () => {
+  FakeWS.instances = [];
+  const feed = new CensusFeed({
+    rpcUrls: ['https://mainnet.helius-rpc.com/?api-key=<redacted>'],
+    rpcFn: async () => null,
+    wsImpl: FakeWS,
+  });
+  feed.start();
+  assert.equal(FakeWS.instances[0].url, 'wss://mainnet.helius-rpc.com/?api-key=<redacted>');
+  assert.equal(feed.stats.endpoint, 'mainnet.helius-rpc.com');
   feed.stop();
 });

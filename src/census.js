@@ -195,8 +195,14 @@ export function censusStamp(pos, now, windowMs) {
  * rpcFn(method, params) fetches transactions (the executor's RPC in prod).
  */
 export class CensusFeed {
-  constructor({ rpcUrls = [], rpcFn, onTrade, onStats, wsImpl } = {}) {
-    this.url = wsUrlFor(rpcUrls[0]);
+  constructor({ rpcUrls = [], rpcUrl = null, rpcFn, onTrade, onStats, wsImpl } = {}) {
+    // Endpoint: CENSUS_RPC_URL (cfg.censusRpcUrl, wired in index.js) wins
+    // over the shared list — the census socket gets its own endpoint so a
+    // sick or capped primary RPC can never blind the deep-check layer
+    // again (2026-10-22: 71+ failed reconnects against a halted plan
+    // while the bot traded on via the fallback). Empty = derive from
+    // RPC_URLS[0], the historical behavior.
+    this.url = wsUrlFor(rpcUrl || rpcUrls[0]);
     this.rpcFn = rpcFn || (async () => null);
     this.onTrade = onTrade || (() => {});
     this.onStats = onStats || (() => {});
@@ -213,7 +219,12 @@ export class CensusFeed {
     this.queue = [];
     this.inflight = 0;
     this.maxInflight = 6;
-    this.stats = { connected: false, subs: 0, notifications: 0, fetched: 0, parsed: 0, dropped: 0, reconnects: 0, lastMsgTs: 0, lastTradeTs: 0, lastError: null };
+    // endpoint: the dialed host ONLY (never the full URL — a keyed
+    // endpoint carries its key in the query) so /state can prove which
+    // endpoint the socket is actually on.
+    let endpoint = null;
+    try { endpoint = this.url ? new URL(this.url).hostname : null; } catch { endpoint = null; }
+    this.stats = { connected: false, subs: 0, notifications: 0, fetched: 0, parsed: 0, dropped: 0, reconnects: 0, lastMsgTs: 0, lastTradeTs: 0, lastError: null, endpoint };
   }
 
   _emitStats() { try { this.onStats({ ...this.stats }); } catch {} }

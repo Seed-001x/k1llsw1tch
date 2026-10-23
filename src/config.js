@@ -717,6 +717,8 @@ export function loadConfig(env = process.env) {
     // the census stamps and the judge consume.
     censusWatch: env.CENSUS_WATCH !== '0',
     censusWindowMin: num(env, 'CENSUS_WINDOW_MIN', 10),
+    // CENSUS ENDPOINT OVERRIDE (owner order 2026-10-23 00:18 EDT, after the 2026-10-22 blindness): the census websocket derived its URL from RPC_URLS[0] and NOTHING else — when that key's plan halted, the socket ate 71+ failed reconnects (HTTP 429 on the handshake) and the whole deep-check layer (pre-entry veto, grind judge) sat dark for hours while the bot traded on via the fallback endpoint. CENSUS_RPC_URL gives the census socket its own endpoint (an http(s) or ws(s) URL; census.js wsUrlFor converts the scheme). Empty = derive from RPC_URLS[0], exactly as before. Only the subscription socket moves: the census's transaction fetches still ride the executor's RPC list and fail open per call, as they always have.
+    censusRpcUrl: (env.CENSUS_RPC_URL || '').trim(),
     // GRIND JUDGE (owner order 2026-10-18, "do what must be done"): the
     // downside judge for puppeted coins — fires pre-TP1 when BOTH witnesses
     // agree the bid is manufactured: the trailing fake-alive share is high
@@ -1065,6 +1067,7 @@ export function validateConfig(cfg) {
   if (cfg.runnerMinBuyRatioM5 < 0 || cfg.runnerMinBuyRatioM5 > 1) errs.push('RUNNER_MIN_BUY_RATIO_M5 must be between 0 and 1');
   if (cfg.runnerMaxDrawPeakPct < 0 || cfg.runnerMaxDrawPeakPct > 100) errs.push('RUNNER_MAX_DRAW_PEAK_PCT must be between 0 and 100');
   if (!(cfg.runnerMaxAgeDays > 0) || cfg.runnerMaxAgeDays > 365) errs.push('RUNNER_MAX_AGE_DAYS must be > 0 and <= 365');
+  if (cfg.censusRpcUrl && !/^(https?|wss?):\/\//.test(cfg.censusRpcUrl)) errs.push('CENSUS_RPC_URL must be an http(s) or ws(s) URL (or empty)');
   if (!(cfg.flowConfirmWindowH > 0) || cfg.flowConfirmWindowH > 72) errs.push('FLOW_CONFIRM_WINDOW_H must be > 0 and <= 72');
   if (!(cfg.flowConfirmMinMc >= 0)) errs.push('FLOW_CONFIRM_MIN_MC must be >= 0');
   if (!(cfg.flowConfirmSol > 0) || cfg.flowConfirmSol > 1) errs.push('FLOW_CONFIRM_SOL must be > 0 and <= 1');
