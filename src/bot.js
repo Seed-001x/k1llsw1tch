@@ -2310,10 +2310,30 @@ export class Bot {
     // 2026-10-18: BASE_STAIRCASE_MIN_VOL_M5, default 0 = exempt — the
     // mark's structure is its aliveness proof); every other base shape
     // uses the shared floor.
-    const floor = sig && sig.setup === 'staircase' ? this.cfg.baseStaircaseMinVolM5 : this.cfg.baseMinVolM5;
+    const isStair = !!(sig && sig.setup === 'staircase');
+    const floor = isStair ? this.cfg.baseStaircaseMinVolM5 : this.cfg.baseMinVolM5;
     if (!(floor > 0)) return false;
     const vol = v && Number.isFinite(v.volM5) ? v.volM5 : null;
+    const h1 = v && Number.isFinite(v.volH1) ? v.volH1 : null;
+    // Every staircase judgment stamps its hourly reading into the
+    // signal metrics — the counterfactual record (owner 2026-10-23:
+    // the journal carried no volH1, so pulse deaths could not be
+    // re-judged against a 60-minute measure after the fact).
+    if (isStair && sig) { sig.metrics = sig.metrics || {}; sig.metrics.pace = { volH1: h1, volM5: vol, rescued: false }; }
     if (vol != null && vol >= floor) return false;
+    // PACE COMPANION (owner order 2026-10-23): a staircase mark under
+    // the 5-minute floor is rescued when the HOUR was genuinely hot
+    // and the current slice still pulses — sustained flow judged on
+    // pace, not one slice. cfg.staircasePaceH1 = 0 disables; bottom
+    // and range never rescue (their coins print volume by
+    // construction — see the config note).
+    if (isStair && this.cfg.staircasePaceH1 > 0 && h1 != null && h1 >= this.cfg.staircasePaceH1 && vol != null && vol >= this.cfg.staircasePaceMinM5) {
+      sig.metrics.pace.rescued = true;
+      const bm = this._baseStats();
+      bm.paceRescues = (bm.paceRescues || 0) + 1;
+      console.log(`[basemode] ${v.symbol} (staircase): pulse rescued by hourly pace — volM5 ${fmtUsd(vol)} under the ${fmtUsd(floor)} floor, volH1 ${fmtUsd(h1)} over the ${fmtUsd(this.cfg.staircasePaceH1)} pace bar`);
+      return false;
+    }
     const bm = this._baseStats();
     bm.pulseSkips.total++;
     bm.pulseSkips.bySetup[sig.setup] = (bm.pulseSkips.bySetup[sig.setup] || 0) + 1;

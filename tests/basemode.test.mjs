@@ -590,3 +590,68 @@ test('enrollment gate is range-only: an unenrolled mint’s STAIRCASE mark still
   assert.equal(calls.length, 1);
   assert.equal(bot.stats.baseMode.rangeUnenrolled, 0);
 });
+
+// ------------------------------------------------------------ pace companion (owner order 2026-10-23)
+const SMARK = { type: 'mark', ts: T0, mint: 'MINTS', symbol: 'STAIR', watchId: 'sw-1', markId: 'sw-1-m3', ordinal: 3, price: 1, lowPrev: 0.9, lowNew: 0.95 };
+
+test('pace companion: a staircase mark under the floor is rescued by a hot hour with a live slice — the YAGI shape', async () => {
+  const srig = rangeRig({ staircaseLive: 1, baseStaircaseMinVolM5: 6000 });
+  srig.views.set('MINTS', view({ address: 'MINTS', symbol: 'STAIR', volM5: 2000, volH1: 40_000 }));
+  srig.bot._evalStaircase(SMARK);
+  await flush();
+  assert.equal(srig.calls.length, 1, 'the rescued mark routes to onSignal');
+  assert.equal(srig.bot.stats.baseMode.pulseSkips.total, 0);
+  assert.equal(srig.bot.stats.baseMode.paceRescues, 1);
+  assert.equal(srig.calls[0].sig.metrics.pace.rescued, true);
+  assert.equal(srig.calls[0].sig.metrics.pace.volH1, 40_000);
+});
+
+test('pace companion: a hot hour does NOT rescue a dead slice — the recency minimum holds the doctrine', async () => {
+  const srig = rangeRig({ staircaseLive: 1, baseStaircaseMinVolM5: 6000 });
+  srig.views.set('MINTS', view({ address: 'MINTS', symbol: 'STAIR', volM5: 500, volH1: 90_000 }));
+  srig.bot._evalStaircase(SMARK);
+  await flush();
+  assert.equal(srig.calls.length, 0);
+  assert.equal(srig.bot.stats.baseMode.pulseSkips.bySetup.staircase, 1);
+  assert.equal(srig.bot.stats.baseMode.paceRescues || 0, 0);
+  const rec = srig.bot.journal.signals.at(-1);
+  assert.equal(rec.metrics.pace.volH1, 90_000, 'the skipped record still carries the hourly reading for counterfactuals');
+  assert.equal(rec.metrics.pace.rescued, false);
+});
+
+test('pace companion: a cold hour rescues nothing — both legs must pass', async () => {
+  const srig = rangeRig({ staircaseLive: 1, baseStaircaseMinVolM5: 6000 });
+  srig.views.set('MINTS', view({ address: 'MINTS', symbol: 'STAIR', volM5: 2000, volH1: 20_000 }));
+  srig.bot._evalStaircase(SMARK);
+  await flush();
+  assert.equal(srig.calls.length, 0);
+  assert.equal(srig.bot.stats.baseMode.pulseSkips.bySetup.staircase, 1);
+});
+
+test('pace companion: STAIRCASE_PACE_H1=0 disables the rescue entirely', async () => {
+  const srig = rangeRig({ staircaseLive: 1, baseStaircaseMinVolM5: 6000, staircasePaceH1: 0 });
+  srig.views.set('MINTS', view({ address: 'MINTS', symbol: 'STAIR', volM5: 2000, volH1: 900_000 }));
+  srig.bot._evalStaircase(SMARK);
+  await flush();
+  assert.equal(srig.calls.length, 0);
+  assert.equal(srig.bot.stats.baseMode.pulseSkips.bySetup.staircase, 1);
+});
+
+test('pace companion: bottom marks never rescue — the floor does real work on dumpers', async () => {
+  const brig = bottomRig();
+  brig.views.set('MINTB', view({ address: 'MINTB', symbol: 'BOTM', volM5: 100, volH1: 500_000 }));
+  brig.bot._evalBottom(BMARK);
+  await flush();
+  assert.equal(brig.calls.length, 0);
+  assert.equal(brig.bot.stats.baseMode.pulseSkips.bySetup.bottom, 1);
+  assert.equal(brig.bot.stats.baseMode.paceRescues || 0, 0);
+});
+
+test('pace companion config: defaults 36000 / 1000, env overrides parse, negatives rejected', () => {
+  const c = loadConfig({});
+  assert.equal(c.staircasePaceH1, 36000);
+  assert.equal(c.staircasePaceMinM5, 1000);
+  assert.equal(loadConfig({ STAIRCASE_PACE_H1: '0' }).staircasePaceH1, 0);
+  assert.ok(validateConfig(loadConfig({ STAIRCASE_PACE_H1: '-5' })).some(e => e.includes('STAIRCASE_PACE_H1')));
+  assert.ok(validateConfig(loadConfig({ STAIRCASE_PACE_MIN_M5: '-1' })).some(e => e.includes('STAIRCASE_PACE_MIN_M5')));
+});

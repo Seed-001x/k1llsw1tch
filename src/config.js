@@ -195,6 +195,19 @@ export function loadConfig(env = process.env) {
     // Bottom and range keep the $5,000 floor — dumping coins generate
     // plenty of volume, and for those doors the floor does real work.
     baseStaircaseMinVolM5: num(env, 'BASE_STAIRCASE_MIN_VOL_M5', 0), // pulse floor for staircase entries only, USD 5m volume (0 = exempt)
+    // PACE COMPANION (owner order 2026-10-23): a single 5-minute slice
+    // lies in both directions — a coin with a genuinely hot HOUR can
+    // print a quiet slice at judgment (the YAGI shape: judged slices
+    // $4-5K while the hour did $216K). A staircase mark under the
+    // pulse floor is rescued when the hour clears STAIRCASE_PACE_H1
+    // AND the current slice still shows a live pulse at/above
+    // STAIRCASE_PACE_MIN_M5. The recency minimum is the doctrine
+    // guard: an hour that WAS hot and has gone quiet still dies.
+    // Staircase only — bottom/range dumpers print plenty of volume
+    // by construction, their floor does real work, and a rescue
+    // there would rescue dumps. STAIRCASE_PACE_H1 = 0 disables.
+    staircasePaceH1: num(env, 'STAIRCASE_PACE_H1', 36000),       // hourly-volume bar for the pulse rescue, USD (0 = off)
+    staircasePaceMinM5: num(env, 'STAIRCASE_PACE_MIN_M5', 1000), // recency minimum the rescue still requires of volM5, USD
     // TRENDING SEEDING (owner order 2026-10-18 18:54 EDT): the structure
     // watch was only ever seeded by journaled signals, so a coin had to do
     // something loud before it could become a staircase candidate — quiet
@@ -1094,6 +1107,8 @@ export function validateConfig(cfg) {
   if (!(cfg.flowConfirmKillN >= 1)) errs.push('FLOW_CONFIRM_KILL_N must be >= 1');
   if (!(cfg.baseMinVolM5 >= 0)) errs.push('BASE_MIN_VOL_M5 must be >= 0 (USD)');
   if (!(cfg.baseStaircaseMinVolM5 >= 0)) errs.push('BASE_STAIRCASE_MIN_VOL_M5 must be >= 0 (USD)');
+  if (!(cfg.staircasePaceH1 >= 0)) errs.push('STAIRCASE_PACE_H1 must be >= 0 (USD)');
+  if (!(cfg.staircasePaceMinM5 >= 0)) errs.push('STAIRCASE_PACE_MIN_M5 must be >= 0 (USD)');
   if (cfg.structureTrendSeed < 0 || cfg.structureTrendSeed > 1) errs.push('STRUCTURE_TREND_SEED must be 0 or 1');
   if (!(cfg.structureSeedMinMc >= 0)) errs.push('STRUCTURE_SEED_MIN_MC must be >= 0 (USD)');
   if (!(cfg.structureTrendSeedPerHour >= 0)) errs.push('STRUCTURE_TREND_SEED_PER_HOUR must be >= 0');
