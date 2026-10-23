@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { History } from './history.js';
-import { detect, detectChurn, detectLiftoff, eligible, eligibleChecks, liqFamilyChecks, fastPop, fastPopFloors, judgeScan, closestCall, betterScanVerdict } from './detect.js';
+import { detect, detectChurn, detectLiftoff, eligible, eligibleChecks, liqFamilyChecks, fastPop, fastPopFloors, judgeScan, closestCall, betterScanVerdict, tapeWindow } from './detect.js';
 import { runGates, hasHardFail, tempRuleViolation, blockedNameWord, extensionCheck, freshHistoryCheck, flowSnapshotCheck, shallowDipCheck, runnerLaneVerdict, summarizeGateChecks, holderSamples, foldLastTrades, insiderCountVerdict, fastBondVerdict, burstBondVerdict, birthMemoryVerdict, topGuardVerdict } from './gate.js';
 import { computeSignalFields } from './signalFields.js';
 import { evaluateExit } from './exits.js';
@@ -24,6 +24,7 @@ import { FlowExits } from './flowExits.js';
 import { StructureWatch, pickTrendSeeds, STRUCTURE_MAX_WATCHES, STRUCTURE_TREND_RESERVE } from './structureWatch.js';
 import { StaircaseSignal } from './staircaseSignal.js';
 import { BottomWatch } from './bottomWatch.js';
+import { CurlWatch } from './curlWatch.js';
 import { RangeWatch } from './rangeWatch.js';
 import { ConfluenceSignal } from './confluenceSignal.js';
 import { ScanLab, buildScanCard } from './scanLab.js';
@@ -98,10 +99,14 @@ export class Bot {
     // re-checks (the coin simply re-signals later, exactly as a dropped
     // no-view retry behaves).
     this.liqPending = new Map();
+    this.curlPending = new Map(); // CURL door: mint -> {rec, at} no-view fire retries (the _evalStaircase discipline)
     this.rangeWatch = new RangeWatch({ cfg, journal: this.journal, dir: cfg.dataDir, now: this.now, log: console.log, wasExited: (mint) => this.journal.trades.some(t => t.type === 'close' && t.mint === mint), isHeld: (mint) => this.positions.some(p => p.mint === mint), onMark: (rec) => { try { this._evalRange(rec); } catch { /* live tap (RANGE_LIVE) — self-guarded, async, fail-silent: can never disturb the study */ } }, fetchCandles: (pool, fromTs, toTs) => this.structureWatch.fetchCandles(pool, fromTs, toTs), resolvePool: (mint) => this.structureWatch.resolvePool(mint) }); // Range Study (owner 2026-10-16): a tight sideways base held over the trailing window journals one mark per range episode to range_marks.jsonl; forward-scored by the structure watch's own candle tailer (/rangewatch) — expanded / broke down / ranged; fed from the poll + outcome-observer view streams — no sampler of its own. Marks ALSO route live entries via the onMark tap (RANGE_LIVE, default on — his correction: "None of this is shadow btw — Real")
     this.scanLab = new ScanLab({ cfg, journal: this.journal, now: this.now, log: console.log }); // Scan Ledger scorer (record-only): r15/r60 after each finalized scan session; no decision reads it
     this.scanFold = new Map(); // Scan Ledger: mint -> live watch-session fold (cheap scalars only; finalized into the journal by _scanSweep)
     this.lastScanSweepTs = 0;
+    this.curlWatch = new CurlWatch({ cfg, now: this.now, log: console.log, samples: (mint) => this.history.get(mint), tape: (mint, n) => this._tapeSync(mint, n), onFire: (rec) => { try { this._evalCurl(rec); } catch { /* live tap (CURL) — self-guarded, async, fail-silent: can never disturb the watch */ } } }); // Curl door (owner design + order 2026-10-23): peak -> retrace -> base -> curl-up watch; fed from the poll + outcome-observer view streams like the sibling watches; fires route into onSignal as setup 'curl'. Kill switch: CURL_LIVE=0 (shadow routing).
+    this._freshViews = new Map(); // FRESH TAPE cache: mint -> {at, view} (25s) — see _liveView
+    this._solUsdCache = { at: 0, val: null }; // last SOL/USD any fresh read obtained; the stream tape's converter
     this.journal.onStructureSignal = (rec) => { try { this.structureWatch.seed(rec); } catch { /* observer only — never disturb the signal path */ } }; // seeding seam: the Journal.signal() funnel (taken/skipped/shadow/flow alike)
     this.risk = new Risk(cfg, { dir: cfg.dataDir, now: this.now });
     this.closedIds = new Set(this.journal.trades.filter(t => t.type === 'close').map(t => t.id)); // journaling guarantee (ensureClose)
@@ -1098,7 +1103,12 @@ export class Bot {
     let buf = this.streamBuf.get(mint);
     if (!buf) { buf = []; this.streamBuf.set(mint, buf); }
     buf.push(trade);
-    const cutoff = trade.ts - (this.cfg.fastPopWindowSec * 1000 + 60000);
+    // Retention: the fast-pop window plus slack, but never under 6
+    // minutes — the stream tape ruler (tapeWindow; FRESH TAPE AT
+    // JUDGMENT) reads a trailing 5m off this buffer. The 600-trade
+    // cap below still bounds memory on hot mints, and the fastPop
+    // detector filters by its own window, so it sees no change.
+    const cutoff = trade.ts - Math.max(this.cfg.fastPopWindowSec * 1000 + 60000, 360000);
     while (buf.length && buf[0].ts < cutoff) buf.shift();
     if (buf.length > 600) buf.splice(0, buf.length - 600);
     const n = this.now();
@@ -1790,6 +1800,7 @@ export class Bot {
         try { if (this.scanLab) this.scanLab.observe(v, n); } catch { /* scan scorer — record-only */ }
         try { if (this.bottomWatch) this.bottomWatch.observe(v, n); } catch { /* bottom tracker — record-only */ }
         try { if (this.rangeWatch) this.rangeWatch.observe(v, n); } catch { /* range study — record-only */ }
+        try { if (this.curlWatch) this.curlWatch.observe(v, n); } catch { /* curl watch — tracks peak/retrace arcs */ }
         this.outcomeSeenAt.set(mint, n);
         this.stats.outcomeObs.views++;
       }
@@ -1816,7 +1827,7 @@ export class Bot {
     try {
       this.evictBlacklisted(); // marked coins never even get priced, let alone signal
       const mints = [...new Set([...this.watch.keys(), ...this.positions.map(p => p.mint)])];
-      if (!mints.length) { try { await this.outcomeTick(this.now()); } catch { /* observer only */ } try { await this._flowRetryTick(this.now()); } catch { /* record-only retry */ } try { await this._staircaseRetryTick(this.now()); } catch { /* staircase retry */ } try { await this._rangeRetryTick(this.now()); } catch { /* range-live retry */ } try { await this._bottomRetryTick(this.now()); } catch { /* bottom-live retry */ } try { await this._preEntryTick(this.now()); } catch { /* pre-entry census */ } try { await this._rangeDipTick(this.now()); } catch { /* range dip watch */ } try { await this._walletRetryTick(this.now()); } catch { /* wallet-live retry */ } try { await this._liqRecheckTick(this.now()); } catch { /* liq re-check */ } try { await this.walletWatch.finalizeTick(this.now()); } catch { /* shadow outcomes */ } try { await this.calloutLab.tick(this.now()); } catch { /* shadow callouts */ } try { await this.flowExits.tick(this.now()); } catch { /* shadow flow exits */ } try { await this.structureWatch.tick(this.now()); } catch { /* shadow structure watch */ } try { await this.bottomWatch.tick(this.now()); } catch { /* shadow bottom tracker */ } try { await this.rangeWatch.tick(this.now()); } catch { /* shadow range study */ } try { this._scanSweep(this.now()); } catch { /* scan ledger */ } return; }
+      if (!mints.length) { try { await this.outcomeTick(this.now()); } catch { /* observer only */ } try { await this._flowRetryTick(this.now()); } catch { /* record-only retry */ } try { await this._staircaseRetryTick(this.now()); } catch { /* staircase retry */ } try { await this._curlRetryTick(this.now()); } catch { /* curl retry */ } try { await this._rangeRetryTick(this.now()); } catch { /* range-live retry */ } try { await this._bottomRetryTick(this.now()); } catch { /* bottom-live retry */ } try { await this._preEntryTick(this.now()); } catch { /* pre-entry census */ } try { await this._rangeDipTick(this.now()); } catch { /* range dip watch */ } try { await this._walletRetryTick(this.now()); } catch { /* wallet-live retry */ } try { await this._liqRecheckTick(this.now()); } catch { /* liq re-check */ } try { await this.walletWatch.finalizeTick(this.now()); } catch { /* shadow outcomes */ } try { await this.calloutLab.tick(this.now()); } catch { /* shadow callouts */ } try { await this.flowExits.tick(this.now()); } catch { /* shadow flow exits */ } try { await this.structureWatch.tick(this.now()); } catch { /* shadow structure watch */ } try { await this.bottomWatch.tick(this.now()); } catch { /* shadow bottom tracker */ } try { await this.rangeWatch.tick(this.now()); } catch { /* shadow range study */ } try { this._scanSweep(this.now()); } catch { /* scan ledger */ } return; }
       const views = await this.d.fetchViews(mints);
       const n = this.now();
       // D4 (user 2026-10-13): market breadth — the share of sampled coins green on the hour —
@@ -1845,6 +1856,7 @@ export class Bot {
         try { if (this.scanLab) this.scanLab.observe(v, n); } catch { /* scan scorer — record-only */ }
         try { if (this.bottomWatch) this.bottomWatch.observe(v, n); } catch { /* bottom tracker — record-only */ }
         try { if (this.rangeWatch) this.rangeWatch.observe(v, n); } catch { /* range study — record-only */ }
+        try { if (this.curlWatch) this.curlWatch.observe(v, n); } catch { /* curl watch — tracks peak/retrace arcs */ }
         this.outcomeSeenAt.set(mint, n); // the trading poll just fed the outcome tracker for this mint
         if (this.positions.some(p => p.mint === mint)) { try { if (this.cfg.scanStamps) this._noteScanHeld(mint); } catch { /* record-only */ } continue; }
         if (tickCfg.churnEnabled) this._updateChurnPins(mint, n);
@@ -1925,6 +1937,7 @@ export class Bot {
       try { await this.outcomeTick(n); } catch { /* observer only */ }
       try { await this._flowRetryTick(n); } catch { /* record-only retry */ }
       try { await this._staircaseRetryTick(n); } catch { /* staircase retry */ }
+      try { await this._curlRetryTick(n); } catch { /* curl retry */ }
       try { await this._rangeRetryTick(n); } catch { /* range-live retry */ } try { await this._bottomRetryTick(n); } catch { /* bottom-live retry */ } try { await this._preEntryTick(n); } catch { /* pre-entry census */ } try { await this._rangeDipTick(n); } catch { /* range dip watch */ }
       try { await this._walletRetryTick(n); } catch { /* wallet-live retry */ }
       try { await this._liqRecheckTick(n); } catch { /* liq re-check */ }
@@ -2140,7 +2153,8 @@ export class Bot {
   shadowedSetup(setup) {
     const trendShadowed = this.cfg.trendLive == null ? !!this.cfg.trendShadow : !this.cfg.trendLive;
     const popShadowed = this.cfg.popLive == null ? false : !this.cfg.popLive;
-    return (setup === 'trend' && trendShadowed) || (setup === 'liftoff' && !!this.cfg.liftoffShadow) || (setup === 'pop' && popShadowed);
+    const curlShadowed = this.cfg.curlLive == null ? false : !this.cfg.curlLive;
+    return (setup === 'trend' && trendShadowed) || (setup === 'liftoff' && !!this.cfg.liftoffShadow) || (setup === 'pop' && popShadowed) || (setup === 'curl' && curlShadowed);
   }
 
   shadow(v, sig, gates = null, gatePass = null) {
@@ -2209,6 +2223,79 @@ export class Bot {
     let n = 0;
     for (const s of sigs) if (s && s.mint === mint && s.setup === 'trend' && s.decision !== 'shadow') n++;
     return n + 1;
+  }
+
+  /** The bot's own stream tape for a mint right now (trailing 5m over
+   *  streamBuf, detect.js tapeWindow), or null when there is no buffer
+   *  or no SOL/USD price to convert with. Sync + fail-open: the tape
+   *  is a bonus ruler, never a dependency. */
+  _tapeSync(mint, n = this.now()) {
+    const buf = this.streamBuf.get(mint);
+    if (!buf || !buf.length || !(this._solUsdCache.val > 0)) return null;
+    return tapeWindow(buf, n, { solUsd: this._solUsdCache.val });
+  }
+
+  /** FRESH TAPE AT JUDGMENT (owner order 2026-10-23 01:15 EDT, the
+   *  yagi lag): produce the view a live judgment should read. With
+   *  fetch on, the mint is re-read on the spot (deps.fetchViews, 25s
+   *  per-mint cache — a burst of marks shares one re-read) and its
+   *  market fields replace the sweep snapshot's. Then the bot's own
+   *  trade stream adjusts volM5/buys/sells UPWARD when the stream's
+   *  trailing-5m tape is livelier than the view claims — both
+   *  observed failures (the $4,113 staircase stamp against a ~$8.6K
+   *  real tape; the lane's $13,818 against ~$15K) were false-dead
+   *  readings, never false-alive ones. The three rulers are stamped
+   *  on the signal record (sig.metrics.tape) so any judgment can be
+   *  audited after the fact. Fail-open everywhere: a failed fetch or
+   *  an unwatched mint returns the incoming view untouched, and
+   *  FRESH_READ=0 (or a hand-built cfg without the knob) returns it
+   *  byte-identically. */
+  async _liveView(v, sig, n, { fetch = false } = {}) {
+    if (!v || !v.address || !this.cfg.freshRead) return v;
+    this.stats.freshRead = this.stats.freshRead || { fetches: 0, hits: 0, misses: 0, tapeUsed: 0 };
+    let eff = v;
+    let fresh = null;
+    if (fetch) {
+      const hit = this._freshViews.get(v.address);
+      if (hit && n - hit.at < 25000) fresh = hit.view;
+      else {
+        try { const m = await this.d.fetchViews([v.address]); fresh = (m && m.get(v.address)) || null; } catch { fresh = null; }
+        this._freshViews.set(v.address, { at: n, view: fresh });
+        this.stats.freshRead.fetches++;
+        if (fresh) this.stats.freshRead.hits++; else this.stats.freshRead.misses++;
+      }
+      if (fresh) {
+        eff = { ...v };
+        // Only the aggregator BUCKET fields swap in: volume, tx counts,
+        // and the %-change family — the fields proven stale on
+        // 2026-10-22. Price/mc/liq deliberately do NOT swap: they are
+        // semantic inputs to the price-based vetoes judged against the
+        // bot's sampled history (shallow-dip, extension), and a re-read
+        // price would silently change what those vetoes judge (suite
+        // catch 2026-10-23: the shallow-dip e2e pins exactly this).
+        for (const k of ['volM5', 'volH1', 'volH6', 'volH24', 'buysM5', 'sellsM5', 'buysH1', 'sellsH1', 'chgM5', 'chgH1', 'chgH6', 'chgH24']) if (Number.isFinite(fresh[k])) eff[k] = fresh[k];
+        if (eff.createdAt == null && fresh.createdAt != null) eff.createdAt = fresh.createdAt;
+        if (fresh.symbol) eff.symbol = fresh.symbol;
+        if (fresh.name) eff.name = fresh.name;
+      }
+    }
+    const buf = this.streamBuf.get(v.address);
+    if (buf && buf.length) {
+      if (!(this._solUsdCache.val > 0) || n - this._solUsdCache.at > 60000) {
+        try { const p = await this.d.fetchSolUsd(); if (p > 0) this._solUsdCache = { at: n, val: p }; } catch { /* keep the last known price */ }
+      }
+      const tw = this._tapeSync(v.address, n);
+      if (tw && tw.covered) {
+        if (tw.volUsd > (eff.volM5 || 0)) {
+          eff = { ...eff, volM5: tw.volUsd, buysM5: tw.buys, sellsM5: tw.sells };
+          this.stats.freshRead.tapeUsed++;
+        }
+        if (sig) { sig.metrics = sig.metrics || {}; sig.metrics.tape = { viewVolM5: v.volM5 ?? null, freshVolM5: fresh ? (fresh.volM5 ?? null) : null, streamVolM5: tw.volUsd, usedVolM5: eff.volM5 ?? null }; }
+        return eff;
+      }
+    }
+    if (sig && fresh) { sig.metrics = sig.metrics || {}; sig.metrics.tape = { viewVolM5: v.volM5 ?? null, freshVolM5: fresh.volM5 ?? null, streamVolM5: null, usedVolM5: eff.volM5 ?? null }; }
+    return eff;
   }
 
   // PULSE FLOOR (owner decision 2026-10-16 23:16 EDT): a base-shape
@@ -2849,6 +2936,7 @@ export class Bot {
     // stamps). No structure low: a staircase is a continuation shape,
     // not a range — the structural stop is range/bottom only.
     if (this.cfg.baseMode) sig.baseTp1 = true;
+    v = await this._liveView(v, sig, n, { fetch: false }); // FRESH TAPE: the stream ruler adjusts the pulse judgment below (see _liveView)
     const elc = eligibleChecks(v, this.cfg, n);
     if (elc.length) {
       // LIQ RE-CHECK (owner order 2026-10-17): a sole $0/missing-liquidity
@@ -2967,6 +3055,7 @@ export class Bot {
       sig.baseTp1 = true;
       if (Number.isFinite(rec.rangeLo) && rec.rangeLo > 0) sig.structureLow = rec.rangeLo;
     }
+    v = await this._liveView(v, sig, n, { fetch: false }); // FRESH TAPE: the stream ruler adjusts the pulse judgment below (see _liveView)
     const elc = eligibleChecks(v, this.cfg, n);
     if (elc.length) {
       // LIQ RE-CHECK (owner order 2026-10-17): a sole $0/missing-liquidity
@@ -3167,6 +3256,7 @@ export class Bot {
       sig.baseTp1 = true;
       if (Number.isFinite(rec.lowMc) && rec.lowMc > 0) sig.structureLow = rec.lowMc;
     }
+    v = await this._liveView(v, sig, n, { fetch: false }); // FRESH TAPE: the stream ruler adjusts the pulse judgment below (see _liveView)
     const elc = eligibleChecks(v, this.cfg, n);
     if (elc.length) {
       // LIQ RE-CHECK (owner order 2026-10-17): a sole $0/missing-liquidity
@@ -3192,6 +3282,65 @@ export class Bot {
     // Fail-open — PREENTRY_CENSUS=0 restores the direct route exactly.
     if (this.cfg.preEntryCensus) { this._startPreEntryWatch(rec, v, sig, n); return; }
     await this.onSignal(v, sig);
+  }
+
+  /** CURL LIVE EVAL (owner order 2026-10-23): a curl watch fire routes
+   *  into the exact same onSignal pipeline as every setup — gates,
+   *  risk, sizing, exits unchanged — via the same guard shape as
+   *  _evalStaircase: fetch a fresh view, refuse a coin already held
+   *  or signaled inside the per-mint cooldown, apply the eligible()
+   *  tradability floor, then let the pipeline judge. A fire whose
+   *  view is missing queues a retry for up to 5 minutes (the episode
+   *  is consumed either way — the watch will not refire it). Kill
+   *  switch: CURL_LIVE=0 (shadow routing in shadowedSetup). */
+  _evalCurl(rec) {
+    if (!rec || !rec.mint) return;
+    const mint = rec.mint;
+    (async () => {
+      const n = this.now();
+      this.stats.curl = this.curlWatch ? this.curlWatch.stats() : { watching: 0, fired: 0, episodes: 0 };
+      const views = await this.d.fetchViews([mint]).catch(() => null);
+      const v = views && views.get(mint);
+      if (!v) { this._queueCurlRetry(rec, n); return; }
+      await this._evalCurlWithView(rec, v, n);
+    })().catch(e => this.err('curlEval', e));
+  }
+
+  /** The judged half of a curl live eval: a fresh view exists, so run
+   *  the guards and route into onSignal. Shared by the fire-time path
+   *  and the retry tick. */
+  async _evalCurlWithView(rec, v, n, liqRechecks = 0) {
+    const mint = rec.mint;
+    this.latest.set(mint, v); this.latestAt.set(mint, n); this.history.record(v, n);
+    if (this.positions.some(p => p.mint === mint)) return; // already holding — nothing to decide
+    if (n - (this.lastSignal.get(mint) || 0) < this.cfg.signalCooldownMin * 60000) return; // signaled moments ago — no re-judge spam
+    const sig = { setup: 'curl', strength: rec.metrics && rec.metrics.curl ? rec.metrics.curl.depth : null, metrics: rec.metrics || {} };
+    if (liqRechecks > 0) sig.liqRechecks = liqRechecks;
+    v = await this._liveView(v, sig, n, { fetch: false }); // FRESH TAPE: the stream ruler joins the judgment (see _liveView)
+    const elc = eligibleChecks(v, this.cfg, n);
+    if (elc.length) { this.skip(v, sig, elc.map(c => `curl-live: ${c.reason}`), [], {}); return; }
+    this.lastSignal.set(mint, n);
+    console.log(`[curl] ${v.symbol}: ${rec.reason || 'curl fire'} — CURL LIVE eval`);
+    await this.onSignal(v, sig);
+  }
+
+  /** A curl fire whose mint had no market view at fire time: queue it
+   *  and retry off-cluster for up to 5 minutes, the _evalStaircase
+   *  discipline. */
+  _queueCurlRetry(rec, n) {
+    if (!this.curlPending.has(rec.mint)) this.curlPending.set(rec.mint, { rec, at: n });
+  }
+
+  async _curlRetryTick(n) {
+    if (!this.curlPending || !this.curlPending.size) return;
+    for (const [mint, p] of [...this.curlPending]) {
+      if (n - p.at > 5 * 60000) { this.curlPending.delete(mint); continue; }
+      const views = await this.d.fetchViews([mint]).catch(() => null);
+      const v = views && views.get(mint);
+      if (!v) continue;
+      this.curlPending.delete(mint);
+      await this._evalCurlWithView(p.rec, v, this.now());
+    }
   }
 
   /** Start a pre-entry census watch for a qualified bottom mark that has
@@ -3661,6 +3810,15 @@ export class Bot {
       console.log(`[nameblock] skip: "${v.name}" contains blocked word "${blockedWord}"`);
       checks.nameblock = { pass: false, reason: `name "${v.name || v.symbol}" contains blocked word "${blockedWord}"` };
       return this.skip(v, sig, [`nameblock: name "${v.name || v.symbol}" contains blocked word "${blockedWord}"`], [], checks);
+    }
+    // FRESH TAPE AT JUDGMENT (owner order 2026-10-23 01:15 EDT): a
+    // live-destined signal is judged on a fresh re-read of its mint
+    // plus the bot's own stream tape, never the poll sweep's aging
+    // snapshot alone (the yagi lag — see _liveView). Shadow-destined
+    // signals skip the refresh entirely: their records stay
+    // byte-identical, exactly as before the fix existed.
+    if (!this.shadowedSetup(sig.setup) && !sig.flowShadowOnly) {
+      v = await this._liveView(v, sig, n, { fetch: true });
     }
     // AGE CAP (owner order 2026-10-18 22:30 EDT, "no buying 2 week old
     // coins or anything above"): a coin whose pair is already

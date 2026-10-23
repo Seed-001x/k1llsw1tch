@@ -621,6 +621,28 @@ export function fastPop(samples, cfg, now) {
   return null;
 }
 
+// ---- STREAM TAPE WINDOW (owner order 2026-10-23, the yagi lag fix) ----
+// The trailing-5-minute tape from the bot's OWN trade stream (streamBuf):
+// first-party, per-trade, no aggregator cache between the tape and the
+// judge. DexScreener's m5 bucket answered nine clustered staircase
+// fetches with the identical $4,113 while the pool really traded ~$8.6K
+// in that window (2026-10-22 21:49 EDT) — when the stream is watching a
+// mint, its sum is the honest ruler. covered = enough recent trades
+// that the stream demonstrably sees this mint's tape right now.
+export function tapeWindow(buf, now, { windowMs = 300000, solUsd = null, minTrades = 3, maxAgeMs = 90000 } = {}) {
+  const empty = { covered: false, volUsd: null, volSol: 0, buys: 0, sells: 0, trades: 0, newestTs: null };
+  if (!buf || !buf.length || !(solUsd > 0)) return empty;
+  let volSol = 0, buys = 0, sells = 0, trades = 0, newestTs = null;
+  for (const t of buf) {
+    if (!t || !(t.ts > 0) || now - t.ts > windowMs || t.ts > now + 5000) continue;
+    trades++; volSol += t.sol || 0;
+    if (t.side === 'buy') buys++; else sells++;
+    if (newestTs == null || t.ts > newestTs) newestTs = t.ts;
+  }
+  if (!trades) return empty;
+  return { covered: trades >= minTrades && newestTs != null && now - newestTs <= maxAgeMs, volUsd: Math.round(volSol * solUsd), volSol, buys, sells, trades, newestTs };
+}
+
 // ---- FAST POP FLOORS (user 2026-10-15) ----
 // Qualification floors judged in bot._evalFastPop AFTER the detector fires:
 // the fire's USD volume figure (metrics.volM5) and the raw burst size

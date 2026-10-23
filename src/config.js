@@ -289,6 +289,20 @@ export function loadConfig(env = process.env) {
     liqRecheckMaxAgeMin: num(env, 'LIQ_RECHECK_MAX_AGE_MIN', 10),
 
     popLive: num(env, 'POP_LIVE', 1) === 1,          // LIVE flip kill switch (owner order 2026-10-22 19:48 EDT, "pop off, staircase only" — after a day of pop entries clipping inside the first minute): true (default) = pop signals route through the live pipeline. POP_LIVE=0 restores shadow routing for pop — signals are journaled + outcome-tracked (shadowGateRecord + virtual shadow trades) but never bought, exactly the TREND_LIVE mechanism. Bot.shadowedSetup consults it only when the knob is present (a hand-built cfg without it keeps pop live, the historical behavior).
+    freshRead: env.FRESH_READ !== '0',   // FRESH TAPE AT JUDGMENT (owner order 2026-10-23 01:15 EDT, the yagi lag): judgments used to read whatever view the poll sweep last cached — and DexScreener's m5 bucket answers clustered re-fetches with the identical figure (2026-10-22 21:49: nine staircase marks stamped volM5 $4,113 while the pool's real 5m tape was ~$8.6K on GeckoTerminal candles). With FRESH_READ on, a live-destined signal re-reads its mint on the spot before the age-cap seam (deps.fetchViews, 25s per-mint cache) and the bot's OWN trade stream (trailing 5m over streamBuf, detect.js tapeWindow) adjusts volM5/buys/sells upward when the stream sees a livelier tape than the view claims — both observed failures were false-dead readings, never false-alive. The record stamps all three rulers (sig.metrics.tape). Shadow-destined signals never refresh (their records stay byte-identical). FRESH_READ=0 restores snapshot judging exactly.
+    curlLive: num(env, 'CURL_LIVE', 1) === 1,          // CURL DOOR (owner order 2026-10-23 01:15 EDT, "build the package AND the curl door together — let's see how it does"): true (default) = curl signals route through the live pipeline. CURL_LIVE=0 restores shadow routing — journaled + outcome-tracked, never bought, the POP_LIVE mechanism. Bot.shadowedSetup consults it only when the knob is present (a hand-built cfg without it keeps curl live).
+    // ---- 'curl' door (owner design 2026-10-23, from his MEOWE chart): a coin that already ran once, retraced hard, based, and is curling up again on returning volume — pop's replacement as the momentum door. The watch (src/curlWatch.js) tracks peak -> retrace low per mint off the poll stream; the fire judges the retrace band, rising lows across the base, the lift band, and follow-through tape. No first-spike chasing: a real prior peak is the entry ticket.
+    curlMinPeakMc: num(env, 'CURL_MIN_PEAK_MC', 150000),   // the first run must have been real: sampled peak mc at/above this
+    curlMinMc: num(env, 'CURL_MIN_MC', 30000),              // fire-time mc band
+    curlMaxMc: num(env, 'CURL_MAX_MC', 1500000),            // aligned with the staircase ceiling
+    curlMinDepth: num(env, 'CURL_MIN_DEPTH', 0.40),        // retrace at least this deep off the peak (fraction)
+    curlMaxDepth: num(env, 'CURL_MAX_DEPTH', 0.75),        // deeper than this is a corpse, not a base
+    curlMinBaseMin: num(env, 'CURL_MIN_BASE_MIN', 10),      // the retrace low must have held at least this long (minutes)
+    curlMinLift: num(env, 'CURL_MIN_LIFT', 0.15),          // price at least this far off the low at fire (fraction)
+    curlMaxLift: num(env, 'CURL_MAX_LIFT', 0.50),          // ... and no further: past this the curl is already extended
+    curlMaxChgM5: num(env, 'CURL_MAX_CHG_M5', 30),         // not vertical right now (% per 5m) — the old pop trap
+    curlMinVolM5: num(env, 'CURL_MIN_VOL_M5', 6000),       // follow-through tape floor (stream-adjusted at judgment)
+    curlMinBuyRatio: num(env, 'CURL_MIN_BUY_RATIO', 0.55), // buyers in control of the m5 tape at fire
     // ---- 'pop' detector (needs live history: flat → vertical) ----
     popWindowSec: num(env, 'POP_WINDOW_SEC', 300),
     popGainPct: num(env, 'POP_GAIN_PCT', 35),
@@ -1068,6 +1082,10 @@ export function validateConfig(cfg) {
   if (cfg.runnerMaxDrawPeakPct < 0 || cfg.runnerMaxDrawPeakPct > 100) errs.push('RUNNER_MAX_DRAW_PEAK_PCT must be between 0 and 100');
   if (!(cfg.runnerMaxAgeDays > 0) || cfg.runnerMaxAgeDays > 365) errs.push('RUNNER_MAX_AGE_DAYS must be > 0 and <= 365');
   if (cfg.censusRpcUrl && !/^(https?|wss?):\/\//.test(cfg.censusRpcUrl)) errs.push('CENSUS_RPC_URL must be an http(s) or ws(s) URL (or empty)');
+  if (!(cfg.curlMinDepth > 0) || !(cfg.curlMinDepth < cfg.curlMaxDepth) || !(cfg.curlMaxDepth < 1)) errs.push('CURL_MIN_DEPTH/CURL_MAX_DEPTH must satisfy 0 < min < max < 1');
+  if (!(cfg.curlMinLift >= 0) || !(cfg.curlMinLift < cfg.curlMaxLift)) errs.push('CURL_MIN_LIFT must be >= 0 and < CURL_MAX_LIFT');
+  if (!(cfg.curlMinBuyRatio > 0) || cfg.curlMinBuyRatio > 1) errs.push('CURL_MIN_BUY_RATIO must be in (0, 1]');
+  if (!(cfg.curlMinVolM5 >= 0)) errs.push('CURL_MIN_VOL_M5 must be >= 0');
   if (!(cfg.flowConfirmWindowH > 0) || cfg.flowConfirmWindowH > 72) errs.push('FLOW_CONFIRM_WINDOW_H must be > 0 and <= 72');
   if (!(cfg.flowConfirmMinMc >= 0)) errs.push('FLOW_CONFIRM_MIN_MC must be >= 0');
   if (!(cfg.flowConfirmSol > 0) || cfg.flowConfirmSol > 1) errs.push('FLOW_CONFIRM_SOL must be > 0 and <= 1');
