@@ -1,0 +1,71 @@
+{
+ "version": "phase1-2026-10-23",
+ "builtTs": 1792804458326,
+ "bot": {
+  "episodes": 237,
+  "labeled": 90,
+  "labels": {
+   "bled-slow": 14,
+   "dumped": 45,
+   "ran": 15,
+   "popped": 8,
+   "flat": 2,
+   "faded": 2,
+   "ground-then-ran": 4
+  },
+  "featureCoverageLabeled": {
+   "buyRatioH1": 0.989,
+   "buyRatioM5": 1.0,
+   "buyVel": 0.933,
+   "chg1m": 0.9,
+   "chgH1": 0.989,
+   "chgH24": 0.989,
+   "chgM5": 0.989,
+   "distFromPeak": 0.989,
+   "drawFromPeak": 0.8,
+   "flowM5": 0.989,
+   "gain": 0.8,
+   "gatesFailed": 0.989,
+   "holderGrowth": 0.489,
+   "insiderWallets": 0.989,
+   "linkedDrain": 0.544,
+   "logAgeMin": 0.989,
+   "logHolders": 0.989,
+   "logLiq": 0.989,
+   "logMc": 0.989,
+   "logPeakAge": 0.989,
+   "logPoolAge": 1.0,
+   "logVolH1": 1.0,
+   "logVolM5": 1.0,
+   "roundTrip": 0.989,
+   "top10Pct": 0.989
+  }
+ },
+ "fleet": {
+  "episodes": 60,
+  "labeled": 49,
+  "labels": {
+   "dumped": 26,
+   "bled-slow": 9,
+   "popped": 6,
+   "ran": 5,
+   "ground-then-ran": 1,
+   "flat": 2
+  },
+  "featureCoverageLabeled": {
+   "buyRatioM5": 0.612,
+   "buyVel": 0.755,
+   "chg1m": 0.776,
+   "curveFill": 0.224,
+   "distFromPeak": 0.98,
+   "drawFromPeak": 0.612,
+   "gain": 0.612,
+   "holderGrowth": 0.143,
+   "logPeakAge": 0.98,
+   "logPoolAge": 1.0,
+   "logVolH1": 0.612,
+   "logVolM5": 0.612
+  }
+ },
+ "note": "Phase-1 library snapshot (~/workspace/memory-loop/data/library_*.jsonl, built 2026-10-23 from the pre-phase-2 record pulls). RECORD-ONLY reference set for the memory judge shadow stamps \u2014 see src/memoryJudge.js and memory-loop/DOCTRINE.md."
+}

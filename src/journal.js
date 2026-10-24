@@ -24,6 +24,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { mean, median, round, readTailLines } from './util.js';
 import { pickResignalMark, verdictOf, buildResignalCard } from './resignalLab.js';
 import { foldStampedPopSignals, buildDeadEntryCard } from './deadEntryLab.js';
@@ -60,7 +61,7 @@ export class Journal {
   constructor(dir, { now = Date.now } = {}) {
     this.now = now;
     this.dir = dir;
-    this.f = { sig: path.join(dir, 'signals.jsonl'), out: path.join(dir, 'outcomes.jsonl'), trades: path.join(dir, 'trades.jsonl'), fb: path.join(dir, 'feedback.jsonl'), ticks: path.join(dir, 'ticks.jsonl'), manual: path.join(dir, 'manual_exits.jsonl'), reports: path.join(dir, 'trade_reports.jsonl'), rshadow: path.join(dir, 'ratchet_shadow.jsonl'), pend: path.join(dir, 'outcome_pending.json'), scan: path.join(dir, 'scans.jsonl'), sses: path.join(dir, 'scan_sessions.jsonl'), cshadow: path.join(dir, 'callout_shadow.jsonl'), rsig: path.join(dir, 'resignal_shadow.jsonl'), fexit: path.join(dir, 'flow_exits.jsonl'), swatch: path.join(dir, 'structure_watch.jsonl'), ssell: path.join(dir, 'shadow_sell.jsonl'), stair: path.join(dir, 'staircase_signals.jsonl'), pticks: path.join(dir, 'position_ticks.jsonl'), bwatch: path.join(dir, 'bottom_marks.jsonl'), rwatch: path.join(dir, 'range_marks.jsonl'), ngcut: path.join(dir, 'nevergreen.jsonl'), fconfirm: path.join(dir, 'flow_confirm.jsonl'), grind: path.join(dir, 'grind_judge.jsonl'), vshadow: path.join(dir, 'veto_shadow.jsonl') };
+    this.f = { sig: path.join(dir, 'signals.jsonl'), out: path.join(dir, 'outcomes.jsonl'), trades: path.join(dir, 'trades.jsonl'), fb: path.join(dir, 'feedback.jsonl'), ticks: path.join(dir, 'ticks.jsonl'), manual: path.join(dir, 'manual_exits.jsonl'), reports: path.join(dir, 'trade_reports.jsonl'), rshadow: path.join(dir, 'ratchet_shadow.jsonl'), pend: path.join(dir, 'outcome_pending.json'), scan: path.join(dir, 'scans.jsonl'), sses: path.join(dir, 'scan_sessions.jsonl'), cshadow: path.join(dir, 'callout_shadow.jsonl'), rsig: path.join(dir, 'resignal_shadow.jsonl'), fexit: path.join(dir, 'flow_exits.jsonl'), swatch: path.join(dir, 'structure_watch.jsonl'), ssell: path.join(dir, 'shadow_sell.jsonl'), stair: path.join(dir, 'staircase_signals.jsonl'), pticks: path.join(dir, 'position_ticks.jsonl'), bwatch: path.join(dir, 'bottom_marks.jsonl'), rwatch: path.join(dir, 'range_marks.jsonl'), ngcut: path.join(dir, 'nevergreen.jsonl'), fconfirm: path.join(dir, 'flow_confirm.jsonl'), grind: path.join(dir, 'grind_judge.jsonl'), vshadow: path.join(dir, 'veto_shadow.jsonl'), mstamp: path.join(dir, 'memory_stamps.jsonl'), pmarks: path.join(dir, 'post_exit_marks.jsonl') };
     this._pendDirty = false;   // outcome-tracking progress changed since the last save
     this._pendSavedAt = 0;
     try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
@@ -226,6 +227,69 @@ export class Journal {
     const outcomeOf = (id) => { const s = id ? this.byId.get(id) : null; return s && s.out && s.out.done ? s.out : null; };
     const records = this.vetoRecords();
     return { enabled: true, shadowOnly: true, generatedTs: this.now(), journalRecords: records.length, ...buildVetoCard(records, outcomeOf) };
+  }
+
+  /** MEMORY-JUDGE shadow stamp (record-only, memory loop phase 2): entry
+   *  stamps and loss-side rule-fire stamps, one JSONL line each. Like the
+   *  callout lab: NO in-memory tail — stamps are write-only evidence for
+   *  the offline grader; nothing in the bot ever reads this file. */
+  memoryStamp(rec) { this.append(this.f.mstamp, rec); return rec; }
+  /** POST-EXIT long mark (record-only, memory loop phase 2): one durable
+   *  record per closed episode carrying its +1h/+4h marks (floor labels,
+   *  SPEC §4(c)), written by PostExitTracker when a long watch finalizes. */
+  postMark(rec) { this.append(this.f.pmarks, rec); return rec; }
+
+  /** Parse one journal stream — the hot JSONL plus its archive twin
+   *  (<dataDir>/archive/<name>.gz, multi-member gzip, exact original
+   *  bytes) — oldest first. Missing/corrupt sources contribute nothing. */
+  _readStream(hotFile) {
+    const parse = (txt) => txt.split('\n').filter(Boolean)
+      .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    let out = [];
+    const gzFile = path.join(this.dir, 'archive', path.basename(hotFile) + '.gz');
+    try { out = parse(zlib.gunzipSync(fs.readFileSync(gzFile)).toString('utf8')); } catch { /* no archive yet */ }
+    try { out.push(...parse(fs.readFileSync(hotFile, 'utf8'))); } catch { /* no hot file yet */ }
+    return out;
+  }
+
+  /** MEMORY LOOP PHASE 2 read path (SPEC §4(a)): the COMPLETE signal +
+   *  outcome history, folded from the durable journal streams (hot file +
+   *  gzip archive) — the in-memory signals array is a 1,500-record window
+   *  and was never the archive. Signals are joined to their outcomes by
+   *  id (hot wins on the rare duplicated id), newest first. 60s cache, the
+   *  vetoRecords idiom: the fold is a full parse, so it is served at most
+   *  once a minute and only paged slices leave the process. */
+  _historySignals() {
+    const n = this.now();
+    if (this._histSigCache && n - this._histSigTs < 60000) return this._histSigCache;
+    const outs = new Map();
+    for (const o of this._readStream(this.f.out)) if (o && o.id) outs.set(o.id, o);
+    const byId = new Map();
+    for (const s of this._readStream(this.f.sig)) if (s && s.id) byId.set(s.id, s);
+    const all = [...byId.values()];
+    for (const s of all) { const o = outs.get(s.id); if (o) s.out = o; else if (!s.out) s.out = {}; }
+    all.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    this._histSigCache = all; this._histSigTs = n;
+    return all;
+  }
+
+  /** One page of the complete signal history: {total, offset, limit, items}. */
+  historySignalsPage({ offset = 0, limit = 200 } = {}) {
+    const all = this._historySignals();
+    return { total: all.length, offset, limit, items: all.slice(offset, offset + limit) };
+  }
+
+  /** One page of the durable +1h/+4h post-exit marks (SPEC §4(c)),
+   *  newest first: {total, offset, limit, items}. Same fold idiom. */
+  historyPostMarksPage({ offset = 0, limit = 200 } = {}) {
+    const n = this.now();
+    if (!(this._histMarkCache && n - this._histMarkTs < 60000)) {
+      const all = this._readStream(this.f.pmarks);
+      all.sort((a, b) => (b.exitTs || 0) - (a.exitTs || 0));
+      this._histMarkCache = all; this._histMarkTs = n;
+    }
+    const all = this._histMarkCache;
+    return { total: all.length, offset, limit, items: all.slice(offset, offset + limit) };
   }
 
   /** FLOW CONFIRMATION LANE events (2026-10-17): lifecycle records for
@@ -470,7 +534,7 @@ export class Journal {
     return rec;
   }
 
-  signal({ mint, symbol, setup, decision, reasons = [], price, mc, metrics = null, warnings = [], label = null, gates = null, gatePass = null, fields = null, shadowGates = null, shadowGatePass = null, liqRechecks = null }) {
+  signal({ mint, symbol, setup, decision, reasons = [], price, mc, metrics = null, warnings = [], label = null, gates = null, gatePass = null, fields = null, shadowGates = null, shadowGatePass = null, liqRechecks = null, memoryJudge = null }) {
     const ts = this.now();
     const id = `${ts}-${++this.seq}`;
     const rec = { id, ts, mint, symbol, setup, decision, reasons, price, mc, metrics, warnings, label };
@@ -497,6 +561,16 @@ export class Journal {
     // path produced this record. Omitted when the evaluation never
     // deferred, so untouched records keep their exact old shape.
     if (liqRechecks != null) rec.liqRechecks = liqRechecks;
+    // Memory loop phase 2 (record-only, owner order 2026-10-23): the compact
+    // memory-judge stamp rides the signal record when the caller computed
+    // one (taken entries only — see Bot._memoryEntryStamp). Omitted when
+    // null, like every other record-only field above.
+    if (memoryJudge != null) rec.memoryJudge = memoryJudge;
+    // …and the 16-point entry shape (the fleet's representation, SPEC
+    // §4(b)) is computed for EVERY journaled signal by the Bot-wired
+    // provider (History samples trailing the signal). Fail-silent: a
+    // shape fault never costs a signal record.
+    if (this.shapeProvider) { try { const sh = this.shapeProvider(rec); if (sh) rec.shape = sh; } catch { /* observer only */ } }
     this.signals.push(rec); this.byId.set(id, rec); rec.out = {};
     if (this.signals.length > SIG_KEEP) { const old = this.signals.shift(); this.byId.delete(old.id); }
     this.append(this.f.sig, rec);

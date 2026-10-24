@@ -756,6 +756,14 @@ export function loadConfig(env = process.env) {
     // at GRIND_KILL_N finalized judge closes, >= GRIND_KILL_WRONG of them
     // ripping >= GRIND_WRONG_PEAK_PCT in the post-exit window disables it.
     grindJudge: env.GRIND_JUDGE !== '0',
+    // MEMORY JUDGE (record-only shadow, memory loop phase 2, owner order
+    // 2026-10-23): stamps the similarity judge's dump/grind/slowdown read
+    // on taken entries and at loss-side rule-fire moments. NOTHING reads
+    // the stamps — no entry/exit/sizing/risk path may consume them.
+    // MEMORY_JUDGE=0 disables stamping entirely (default on). The data
+    // fixes (signal shapes, +1h/+4h post-exit marks, episode trajectories)
+    // are NOT gated by this — they are persistence, not the judge.
+    memoryJudge: env.MEMORY_JUDGE !== '0',
     grindJudgeLive: env.GRIND_JUDGE_LIVE === '1',
     grindMinAgeSec: num(env, 'GRIND_MIN_AGE_SEC', 600),
     grindMaxRatio: num(env, 'GRIND_MAX_RATIO', 0.95),

@@ -782,7 +782,21 @@ export function startServer(bot, port) {
       const all = bot.journal.trades.slice().reverse(); // newest first
       return json(res, 200, { total: all.length, offset: pg.offset, limit: pg.limit, items: all.slice(pg.offset, pg.offset + pg.limit) });
     }
-    return json(res, 404, { error: 'not found', routes: ['/health', '/state', '/pumplists', '/report', '/signals', '/trades', '/postexit', '/shadowtrades'] });
+    if (u.pathname === '/history/signals') {
+      // MEMORY LOOP phase 2 (SPEC §4(a)): the COMPLETE durable signal +
+      // outcome history (hot journal + gzip archive), newest first — the
+      // offline library builder's pull path. Unlike /signals this reads
+      // past the 1,500-record in-memory window. Pages are capped at 200.
+      const pg = paging(u) || { offset: 0, limit: 200 };
+      return json(res, 200, bot.journal.historySignalsPage({ offset: pg.offset, limit: Math.min(200, pg.limit) }));
+    }
+    if (u.pathname === '/history/postmarks') {
+      // MEMORY LOOP phase 2 (SPEC §4(c)): durable +1h/+4h post-exit marks
+      // per closed episode, newest first, pages capped at 200.
+      const pg = paging(u) || { offset: 0, limit: 200 };
+      return json(res, 200, bot.journal.historyPostMarksPage({ offset: pg.offset, limit: Math.min(200, pg.limit) }));
+    }
+    return json(res, 404, { error: 'not found', routes: ['/health', '/state', '/pumplists', '/report', '/signals', '/trades', '/postexit', '/shadowtrades', '/history/signals', '/history/postmarks'] });
   });
   srv.listen(port, () => console.log(`[server] listening on :${port}`));
   return srv;

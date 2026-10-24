@@ -9,6 +9,13 @@ import { evaluateExit } from './exits.js';
 export const POST_EXIT_WINDOW_MS = 5 * 60 * 1000;
 const SAMPLE_EVERY_MS = 5000;
 const KEEP_DONE = 200;
+// Memory loop phase 2 (SPEC §4(c)): long post-exit marks at +1h and +4h,
+// so a closed episode can be labeled "found a floor" from durable data.
+// A watch finalizes when its h4 mark lands or at +4.5h (marks stay null
+// when no view ever arrived — honest, never invented).
+export const LONG_H1_MS = 60 * 60 * 1000;
+export const LONG_H4_MS = 4 * 60 * 60 * 1000;
+export const LONG_FINALIZE_MS = LONG_H4_MS + 30 * 60 * 1000;
 
 export function summarizePostExit(anchorPrice, samples) {
   if (!(anchorPrice > 0) || !samples || !samples.length) {
@@ -26,6 +33,7 @@ export function summarizePostExit(anchorPrice, samples) {
 export class PostExitTracker {
   constructor(dir, now = () => Date.now()) {
     this.file = path.join(dir, 'post_exit.jsonl');
+    this.longFile = path.join(dir, 'post_exit_long.json');
     this.now = now;
     this.pending = new Map(); // position id -> entry
     this.done = [];
@@ -33,6 +41,20 @@ export class PostExitTracker {
       const lines = fs.readFileSync(this.file, 'utf8').trim().split('\n').filter(Boolean).slice(-KEEP_DONE);
       for (const l of lines) { try { this.done.push(JSON.parse(l)); } catch { /* skip bad line */ } }
     } catch { /* no file yet */ }
+    // Long +1h/+4h watches persist across restarts (the outcome_pending.json
+    // idiom: a small state file rewritten on change) so a redeploy can
+    // never silently eat a floor label. Finalized records leave through
+    // onLongDone (Bot wires it to Journal.postMark, the durable store).
+    this.long = new Map(); // position id -> long watch entry
+    this.onLongDone = null;
+    try {
+      const arr = JSON.parse(fs.readFileSync(this.longFile, 'utf8'));
+      if (Array.isArray(arr)) for (const e of arr) if (e && e.id) this.long.set(e.id, e);
+    } catch { /* no state yet */ }
+  }
+
+  _saveLong() {
+    try { fs.writeFileSync(this.longFile, JSON.stringify([...this.long.values()])); } catch { /* best effort */ }
   }
 
   /** Register a just-closed position. anchorPrice = USD price at exit when known;
@@ -48,7 +70,73 @@ export class PostExitTracker {
         anchorPrice: e.exitPriceUsd > 0 ? e.exitPriceUsd : null,
         samples: [],
       });
+      // The same close registers a long watch (+1h/+4h floor marks).
+      if (e.id && !this.long.has(e.id)) {
+        this.long.set(e.id, {
+          id: e.id, mint: e.mint, symbol: e.symbol || null, setup: e.setup || null,
+          exitTs: e.exitTs || this.now(),
+          exitPriceUsd: e.exitPriceUsd > 0 ? e.exitPriceUsd : null,
+          anchor: e.exitPriceUsd > 0 ? e.exitPriceUsd : null,
+          marks: {},
+        });
+        this._saveLong();
+      }
     } catch { /* observer must never throw into the trading path */ }
+  }
+
+  /** Mints with an open long watch — Bot's outcomeTick folds these into
+   *  its fetch set (the bottomWatch/rangeWatch idiom). */
+  longMints() {
+    return [...this.long.values()].map(e => ({ mint: e.mint, since: e.exitTs }));
+  }
+
+  /** Feed one fetched view to the long watches for its mint: record the
+   *  h1 mark at age >= 60m and the h4 mark at age >= 240m (price + MC +
+   *  move vs the exit anchor), then run the expiry sweep. */
+  observeLong(v, n) {
+    try {
+      if (!v || !(v.price > 0)) return;
+      let changed = false;
+      for (const e of this.long.values()) {
+        if (e.mint !== v.address) continue;
+        if (!(e.anchor > 0)) { e.anchor = v.price; changed = true; }
+        const age = n - e.exitTs;
+        for (const [key, ms] of [['h1', LONG_H1_MS], ['h4', LONG_H4_MS]]) {
+          if (!e.marks[key] && age >= ms) {
+            e.marks[key] = {
+              ts: n, price: v.price, mc: v.mc ?? null,
+              movePct: e.anchor > 0 ? +((v.price / e.anchor - 1) * 100).toFixed(1) : null,
+            };
+            changed = true;
+          }
+        }
+      }
+      if (changed) this._saveLong();
+      this.sweepLong(n);
+    } catch { /* observer must never throw into the trading path */ }
+  }
+
+  /** Finalize watches whose h4 mark landed or that outlived the window
+   *  (marks stay null where no view arrived — the record says so). */
+  sweepLong(n) {
+    try {
+      for (const e of [...this.long.values()]) {
+        if (e.marks.h4 || n - e.exitTs >= LONG_FINALIZE_MS) this._finalizeLong(e, n);
+      }
+    } catch { /* observer must never throw into the trading path */ }
+  }
+
+  _finalizeLong(e, n) {
+    this.long.delete(e.id);
+    this._saveLong();
+    const rec = {
+      type: 'postmarks', id: e.id, mint: e.mint, symbol: e.symbol, setup: e.setup,
+      exitTs: e.exitTs, finalTs: n,
+      exitPriceUsd: e.exitPriceUsd, anchorPrice: e.anchor,
+      h1: e.marks.h1 || null, h4: e.marks.h4 || null,
+    };
+    try { if (this.onLongDone) this.onLongDone(rec); } catch { /* observer only */ }
+    return rec;
   }
 
   sample(mint, price, ts) {

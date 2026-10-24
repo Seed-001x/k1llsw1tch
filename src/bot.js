@@ -34,6 +34,7 @@ import { NeverGreenCut } from './neverGreen.js';
 import { snapshotFeatures, externalExit } from './learn.js';
 
 import { PostExitTracker, PairedShadowExits } from './postExit.js';
+import { MemoryJudge, featuresFromSnapshot, shapeFromSamples, lossRuleOf, compactTrajectory, compactStamp } from './memoryJudge.js'; // memory loop phase 2 (record-only shadow — see memoryJudge.js)
 import { ShadowTrades } from './shadowTrades.js';
 import { WalletWatch } from './walletWatch.js';
 import { buildTradeReport } from './reports.js';
@@ -114,6 +115,26 @@ export class Bot {
     for (const t of this.journal.trades) if (t.type === 'close' && t.mint) this.risk.seedClosed(t.mint, t.ts); // re-entry block survives restarts/deploys
     this.lastTrades = foldLastTrades(this.journal.trades); // ran-rebuy block: most recent closed trade per mint, rebuilt from the journal so trades closed before this deploy (e.g. BOOT, 2026-10-14) anchor the rule on its first boot; ensureClose keeps it current
     this.postExit = new PostExitTracker(cfg.dataDir, this.now); // 5-min post-exit price tracker (observer only)
+    // MEMORY JUDGE (record-only shadow — memory loop phase 2, owner order
+    // 2026-10-23 21:04 EDT). The judge ports the phase-1 fleet-recall maths
+    // (src/memoryJudge.js) and stamps taken entries + loss-side rule-fire
+    // moments against the shipped phase-1 library snapshot. RECORD-ONLY by
+    // construction: no entry/exit/sizing/risk code path reads a stamp, and
+    // every stamp site is fail-silent. MEMORY_JUDGE=0 (cfg.memoryJudge)
+    // turns stamping off entirely; the library load itself is also
+    // fail-open — a missing/corrupt snapshot logs once and stamps nothing.
+    this.memoryJudge = null; this.memoryLibMeta = null;
+    if (cfg.memoryJudge) {
+      try {
+        const loaded = MemoryJudge.fromDir(new URL('./memory/', import.meta.url).pathname);
+        if (loaded.judge.episodes.length) {
+          this.memoryJudge = loaded.judge; this.memoryLibMeta = loaded.meta;
+          console.log(`[memory] judge ready: ${loaded.meta.labeled} labeled episodes (${loaded.meta.botEpisodes} bot + ${loaded.meta.fleetEpisodes} fleet, library ${loaded.meta.version}) — RECORD-ONLY shadow stamps`);
+        } else console.log('[memory] judge library empty — stamping silently off, trading unaffected');
+      } catch (e) { console.log(`[memory] judge unavailable (${e.message}) — stamping silently off, trading unaffected`); }
+    }
+    this.journal.shapeProvider = (rec) => this._shapeFor(rec); // entry shapes (SPEC §4(b)) — always on, persistence not judging
+    this.postExit.onLongDone = (rec) => { try { this.journal.postMark(rec); } catch { /* observer only */ } }; // +1h/+4h floor marks → durable store (SPEC §4(c))
     this.paired = new PairedShadowExits(cfg.dataDir, this.now); // D1: virtual would-be exits paired to manual exits (observer only)
     this.shadowSeller = new ShadowSeller({ cfg, journal: this.journal, now: this.now, log: console.log, postExitOf: (id) => (this.postExit && this.postExit.done || []).find(x => x.id === id) || null }); // Shadow Seller (record-only, user 2026-10-16): a LEARNED exit judge — buckets each open position's state and journals its first would-sell when the bot's own completed history says holding from that state paid worse than the mark; pairs against the ladder's actual outcome at close. No ladder rules, no borrowed thresholds; can never sell
     this.neverGreen = new NeverGreenCut({ cfg, journal: this.journal, now: this.now, log: console.log }); // Never-Green Cut SHADOW (record-only, owner 2026-10-17): a position that never peaked above +2%, is 5+ min old, and prints realizable <= -10% for 2 consecutive checks would have been cut — journaled + paired at close in nevergreen.jsonl (/nevergreen); NEVER sells, blocks, or feeds any decision
@@ -521,6 +542,16 @@ export class Bot {
       if (full.feesSol === undefined) { full.feesSol = +((pos.feesSol || 0)).toFixed(6); full.feesSource = 'calibratedTxFees'; }
       if (full.path === undefined) full.path = pos.pathClass ?? null; // two-path class (user 2026-10-15): the 30-position judging sample reads it off the close
       if (full.pnlPct === undefined) full.pnlPct = full.pnlSol != null && full.entrySol > 0 ? +(full.pnlSol / full.entrySol * 100).toFixed(2) : null;
+      // MEMORY LOOP phase 2 (SPEC §4(d)): the compacted per-episode
+      // trajectory — 16-point in-hold shape + peak/min ratio + time
+      // underwater — rides the close record durably (the raw tick series
+      // on position_ticks.jsonl stays disk-only and ages out; this is
+      // the copy the offline library is graded from). Null when the
+      // position never produced a mark — never invented.
+      if (full.trajectory === undefined) {
+        const uwMin = (pos.uwMin || 0) + (pos.uwSince ? (this.now() - pos.uwSince) / 60000 : 0);
+        full.trajectory = compactTrajectory(pos.traj, { underwaterMin: uwMin });
+      }
     } catch { /* record enrichment must never disturb the close itself */ }
     this.journal.trade(full);
     // Ran-rebuy block (user 2026-10-15): keep the most-recent-closed-trade map
@@ -1788,6 +1819,13 @@ export class Bot {
       const have = new Set(pend.map(p => p.mint));
       for (const pm of this.rangeWatch.pendingMints()) if (!have.has(pm.mint)) pend.push(pm);
     }
+    // Post-exit long marks (record-only, SPEC §4(c)): closed episodes with
+    // an open +1h/+4h watch join the fetch set on the same terms — the
+    // floor marks must not depend on watch residence either.
+    if (this.postExit) {
+      const have = new Set(pend.map(p => p.mint));
+      for (const pm of this.postExit.longMints()) if (!have.has(pm.mint)) pend.push(pm);
+    }
     const due = pend.filter(p => n - (this.outcomeSeenAt.get(p.mint) || 0) >= 25000).slice(0, 150);
     if (!due.length) return;
     this.stats.outcomeObs.ticks++;
@@ -1801,10 +1839,13 @@ export class Bot {
         try { if (this.bottomWatch) this.bottomWatch.observe(v, n); } catch { /* bottom tracker — record-only */ }
         try { if (this.rangeWatch) this.rangeWatch.observe(v, n); } catch { /* range study — record-only */ }
         try { if (this.curlWatch) this.curlWatch.observe(v, n); } catch { /* curl watch — tracks peak/retrace arcs */ }
+        try { if (this.postExit) this.postExit.observeLong(v, n); } catch { /* post-exit long marks — record-only */ }
         this.outcomeSeenAt.set(mint, n);
         this.stats.outcomeObs.views++;
       }
     }
+    // Long-watch expiry runs even when no view arrived (marks stay null).
+    try { if (this.postExit) this.postExit.sweepLong(n); } catch { /* observer only */ }
     // Finalization must not depend on views existing at all: past-horizon
     // pendings close out flagged-partial even when every pair is gone.
     try { this.journal.expireSweep(n); } catch { /* observer only */ }
@@ -4461,9 +4502,35 @@ export class Bot {
       });
     }
 
-const takenSigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decision: 'taken', reasons: [], price: v.price, mc: v.mc, metrics: { ...sig.metrics, roundTrip: +rt.ratio.toFixed(3), sizeSol: size }, warnings: g.warnings, label: sig.label || null, gates: checks, gatePass: g.pass, fields: this._fieldsFor(v, sig), liqRechecks: sig.liqRechecks ?? null });
+const takenFields = this._fieldsFor(v, sig);
+    // MEMORY JUDGE entry stamp (record-only, phase 2): the judge reads the
+    // coin exactly as the live pipeline saw it — the entry snapshot, the
+    // signal fields, and the metrics the taken record itself carries — and
+    // its three scores + neighbor evidence ids ride the signal and open
+    // records. Fail-open: any fault (or a thin library) stamps 'unknown'
+    // or nothing; an entry is never blocked or delayed by the judge.
+    let mjCompact = null, mjFull = null, mjFeats = null;
+    if (this.memoryJudge) {
+      try {
+        mjFeats = featuresFromSnapshot(pos.entry, takenFields, { ...sig.metrics, roundTrip: +rt.ratio.toFixed(3) });
+        mjFull = this._memoryJudgeStamp(mjFeats, n, sig.setup, v.address);
+        if (mjFull) mjCompact = compactStamp(mjFull, this.memoryLibMeta);
+      } catch { mjCompact = null; mjFull = null; /* observer only — never disturb the entry */ }
+    }
+    const takenSigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setup: sig.setup, decision: 'taken', reasons: [], price: v.price, mc: v.mc, metrics: { ...sig.metrics, roundTrip: +rt.ratio.toFixed(3), sizeSol: size }, warnings: g.warnings, label: sig.label || null, gates: checks, gatePass: g.pass, fields: takenFields, liqRechecks: sig.liqRechecks ?? null, memoryJudge: mjCompact });
     this._noteVetoShadow({ v, sig, checks, decision: 'taken', reasons: [], signalId: takenSigId });
-    this.journal.trade({ type: 'open', id: pos.id, mint: pos.mint, symbol: pos.symbol, setup: pos.setup, entrySol: pos.entrySol, sig: fill.sig, simulated: fill.simulated, ts: n, stamp: pos.stamp, tokensRaw: fill.tokensRaw, entryFillSol: pos.entryFillSol, entryFillUsd: pos.entryFillSol != null && solUsd > 0 ? +(pos.entryFillSol * solUsd).toFixed(10) : null, ...(slot >= 2 && !laneEntry && this.risk.slotDialSol(slot) > 0 ? { slot } : {}), ...(laneEntry ? { flowConfirm: 1, flowConfirmOrdinal: laneOrdinal } : {}) });
+    this.journal.trade({ type: 'open', id: pos.id, mint: pos.mint, symbol: pos.symbol, setup: pos.setup, entrySol: pos.entrySol, sig: fill.sig, simulated: fill.simulated, ts: n, stamp: pos.stamp, tokensRaw: fill.tokensRaw, entryFillSol: pos.entryFillSol, entryFillUsd: pos.entryFillSol != null && solUsd > 0 ? +(pos.entryFillSol * solUsd).toFixed(10) : null, ...(slot >= 2 && !laneEntry && this.risk.slotDialSol(slot) > 0 ? { slot } : {}), ...(laneEntry ? { flowConfirm: 1, flowConfirmOrdinal: laneOrdinal } : {}), ...(mjCompact ? { memoryJudge: mjCompact } : {}) });
+    // The canonical stamp record (full evidence + the feature vector) and
+    // the entry context the rule-fire stamps will reuse (fields ride the
+    // position; the fire-time features refresh the tape fields on top).
+    if (mjFull) {
+      try {
+        this.journal.memoryStamp({ kind: 'entry', ts: n, id: pos.id, mint: pos.mint, symbol: pos.symbol, setup: pos.setup, signalId: takenSigId, lib: this.memoryLibMeta ? this.memoryLibMeta.version : null, stamp: mjFull, features: mjFeats });
+        this.stats.memoryJudge = this.stats.memoryJudge || { entries: 0, fires: 0, arms: 0 };
+        this.stats.memoryJudge.entries++;
+      } catch { /* observer only */ }
+    }
+    if (mjFeats) pos.memoryEntry = { features: mjFeats, fields: takenFields };
 
     // Flow-Exit Watcher (record-only): a flow-triggered entry starts a watch
     // on the wallet whose buy nominated it — its trim/exit get journaled and
@@ -4561,6 +4628,106 @@ const takenSigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setu
     } catch { /* record-only — never disturb trading */ }
   }
 
+  /** MEMORY LOOP phase 2 — entry shape (SPEC §4(b)): the fleet's 16-point
+   *  representation of the price/volume path trailing the signal, computed
+   *  from History samples (per-mint 90-minute window, volM5 as the volume
+   *  proxy) and stored on the signal record by Journal.signal via the
+   *  shapeProvider hook. Null on thin samples — never invented. */
+  _shapeFor(rec) {
+    try {
+      if (!rec || !rec.mint) return null;
+      const samples = this.history.window(rec.mint, 60 * 60000, rec.ts)
+        .filter(s => s && s.price > 0).map(s => ({ ts: s.ts, price: s.price, vol: s.volM5 }));
+      if (samples.length < 4) return null;
+      const sh = shapeFromSamples(samples);
+      if (!sh) return null;
+      const r4 = (x) => Math.round(x * 10000) / 10000;
+      return { vec: sh.vec.map(r4), slope: r4(sh.slope), chop: r4(sh.vol) };
+    } catch { return null; }
+  }
+
+  /** MEMORY JUDGE (record-only): the judge's read of one feature vector.
+   *  Null when stamping is off or the judge failed to load; the judge
+   *  itself never throws (fail-open 'unknown' verdicts inside). */
+  _memoryJudgeStamp(features, ts, lane, mint) {
+    if (!this.memoryJudge) return null;
+    return this.memoryJudge.judge(features, ts, { lane: lane || null, mint: mint || null });
+  }
+
+  /** MEMORY LOOP phase 2 — in-hold trajectory (SPEC §4(d)): keep this
+   *  check's realizable ratio (value / remaining basis, the exact mark
+   *  _tickJournal computes) on the position, plus the running
+   *  time-underwater total. Compacted onto the close record by
+   *  ensureClose (compactTrajectory). Independent of the tick journal
+   *  and of the judge — it is a data fix, gated by neither. Capped at
+   *  1,200 points (~hours at the position-check cadence); oldest dropped. */
+  _noteTraj(pos, valueSol, n) {
+    if (valueSol == null) return;
+    const basis = pos.entrySol * pos.remainingFrac;
+    if (!(basis > 0)) return;
+    const ratio = valueSol / basis;
+    if (!Number.isFinite(ratio)) return;
+    pos.traj = pos.traj || [];
+    pos.traj.push([Math.round((n - pos.entryTs) / 1000), +ratio.toFixed(4)]);
+    if (pos.traj.length > 1200) pos.traj.splice(0, pos.traj.length - 1200);
+    if (ratio < 1) { if (!pos.uwSince) pos.uwSince = n; }
+    else if (pos.uwSince) { pos.uwMin = (pos.uwMin || 0) + (n - pos.uwSince) / 60000; pos.uwSince = null; }
+  }
+
+  /** MEMORY JUDGE (record-only) — rule-fire stamping: called once per
+   *  managePosition check with the pending-rule state captured BEFORE
+   *  the check's judging (memPrev) and the final decision. Stamps, into
+   *  memory_stamps.jsonl, every loss-side transition this check produced:
+   *  entry-clip arming, stall-exit arming, death-detector pending, and any
+   *  loss-side FIRE (the decision's reason classified by lossRuleOf).
+   *  Profit-side fires (TP ladder, TP1 guard, moonbag, trails) are never
+   *  stamped — profit protection is doctrine, not graded (SPEC §5).
+   *  Hold-time features = the entry snapshot's statics with the tape
+   *  fields refreshed from the current view where the view has them, so
+   *  the stamp describes the coin as it looked when the rule fired. */
+  _noteMemoryFire(pos, v, valueSol, n, memPrev, decision) {
+    if (!this.cfg.memoryJudge || !this.memoryJudge) return;
+    const events = [];
+    if (!memPrev.clip && pos.clipPending) events.push({ kind: 'arm', rule: 'entry-clip' });
+    if (!memPrev.stall && pos.stallPending) events.push({ kind: 'arm', rule: 'stall-exit' });
+    if (!memPrev.dd && pos.ddPendingSince) events.push({ kind: 'arm', rule: 'death-detector' });
+    const fireRule = decision && decision.fraction > 0 ? lossRuleOf(decision.reason) : null;
+    if (fireRule) events.push({ kind: 'fire', rule: fireRule });
+    if (!events.length) return;
+    const e = pos.entry || {};
+    const cur = {};
+    for (const k of ['price', 'mc', 'liq', 'volM5', 'volH1', 'buysM5', 'sellsM5', 'buysH1', 'sellsH1', 'chgM5', 'chgH1', 'chgH24']) {
+      cur[k] = v && Number.isFinite(v[k]) ? v[k] : (e[k] ?? null);
+    }
+    cur.ageMin = v && v.createdAt ? Math.round((n - v.createdAt) / 60000) : (e.ageMin ?? null);
+    const merged = { ...e, ...cur };
+    if (merged.buysM5 != null && merged.sellsM5 != null) merged.flowM5 = +(merged.buysM5 / Math.max(1, merged.sellsM5)).toFixed(2);
+    const held = (pos.memoryEntry && pos.memoryEntry.fields) || null;
+    const feats = featuresFromSnapshot(merged, held, { volM5: merged.volM5, volH1: merged.volH1 });
+    const stamp = this._memoryJudgeStamp(feats, n, pos.setup, pos.mint);
+    if (!stamp) return;
+    const basis = pos.entrySol * pos.remainingFrac;
+    const ratio = valueSol != null && basis > 0 ? valueSol / basis : null;
+    const uwMin = (pos.uwMin || 0) + (pos.uwSince ? (n - pos.uwSince) / 60000 : 0);
+    const hold = {
+      heldMin: +((n - pos.entryTs) / 60000).toFixed(2),
+      ratio: ratio != null ? +ratio.toFixed(4) : null,
+      peakRatio: +(pos.peakRatio || 1).toFixed(4),
+      ddFromPeakPct: ratio != null && pos.peakRatio > 0 ? +((ratio / pos.peakRatio - 1) * 100).toFixed(1) : null,
+      underwaterMin: +uwMin.toFixed(2),
+    };
+    this.stats.memoryJudge = this.stats.memoryJudge || { entries: 0, fires: 0, arms: 0 };
+    for (const ev of events) {
+      this.journal.memoryStamp({
+        kind: ev.kind, rule: ev.rule, ts: n, id: pos.id, mint: pos.mint, symbol: pos.symbol, setup: pos.setup,
+        lib: this.memoryLibMeta ? this.memoryLibMeta.version : null,
+        stamp, features: feats, hold,
+        ...(ev.kind === 'fire' ? { reason: decision.reason } : {}),
+      });
+      if (ev.kind === 'fire') this.stats.memoryJudge.fires++; else this.stats.memoryJudge.arms++;
+    }
+  }
+
   async managePosition(pos, solUsd) {
     const n = this.now();
     const v = this.latest.get(pos.mint) || {};
@@ -4605,6 +4772,10 @@ const takenSigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setu
       }
     }
 
+    // MEMORY JUDGE (record-only): snapshot the pending-rule state BEFORE
+    // this check's judging, so _noteMemoryFire can see which loss-side
+    // rules armed on THIS check (transition detection).
+    const memPrev = { clip: pos.clipPending ?? null, stall: pos.stallPending ?? null, dd: pos.ddPendingSince ?? null };
     let decision;
     if (valueSol == null) {
       // TAKEOVER: a position the user is driving himself is never force-exited —
@@ -4761,6 +4932,10 @@ const takenSigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setu
     // peak update so peakRatio in the record includes this check — the write
     // sits beside the other observers and feeds no decision (see _tickJournal).
     this._tickJournal(pos, v, valueSol, n);
+    // MEMORY LOOP phase 2 (record-only): the durable in-hold trajectory
+    // rides the same seam (SPEC §4(d)) — compacted onto the close record
+    // in ensureClose. Fail-silent; feeds no decision.
+    try { this._noteTraj(pos, valueSol, n); } catch { /* observer only */ }
     if (decision.newPeakMove != null) pos.peakMove = decision.newPeakMove;
     if ('stallSince' in decision) pos.stallSince = decision.stallSince;
     if ('stopArmedTs' in decision) pos.stopArmedTs = decision.stopArmedTs;
@@ -4968,6 +5143,11 @@ const takenSigId = this.journal.signal({ mint: v.address, symbol: v.symbol, setu
         }
       }
     }
+    // MEMORY JUDGE (record-only): stamp this check's loss-side arm/fire
+    // transitions with hold-time features. The decision is final here
+    // (bundle override + stop-xcheck veto already applied — a vetoed exit
+    // returned above and is never stamped as a fire). Nothing reads back.
+    try { this._noteMemoryFire(pos, v, valueSol, n, memPrev, decision); } catch { /* observer only */ }
     if (!(decision.fraction > 0)) { this.savePositions(); return; }
 
     const sellRaw = decision.fraction >= 1 ? BigInt(pos.tokensRaw) : (BigInt(pos.tokensRaw) * BigInt(Math.round(decision.fraction * 1000))) / 1000n;
