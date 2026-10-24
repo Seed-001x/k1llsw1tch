@@ -255,28 +255,97 @@ export class Journal {
   /** MEMORY LOOP PHASE 2 read path (SPEC §4(a)): the COMPLETE signal +
    *  outcome history, folded from the durable journal streams (hot file +
    *  gzip archive) — the in-memory signals array is a 1,500-record window
-   *  and was never the archive. Signals are joined to their outcomes by
-   *  id (hot wins on the rare duplicated id), newest first. 60s cache, the
-   *  vetoRecords idiom: the fold is a full parse, so it is served at most
-   *  once a minute and only paged slices leave the process. */
-  _historySignals() {
-    const n = this.now();
-    if (this._histSigCache && n - this._histSigTs < 60000) return this._histSigCache;
-    const outs = new Map();
-    for (const o of this._readStream(this.f.out)) if (o && o.id) outs.set(o.id, o);
-    const byId = new Map();
-    for (const s of this._readStream(this.f.sig)) if (s && s.id) byId.set(s.id, s);
-    const all = [...byId.values()];
-    for (const s of all) { const o = outs.get(s.id); if (o) s.out = o; else if (!s.out) s.out = {}; }
-    all.sort((a, b) => (b.ts || 0) - (a.ts || 0));
-    this._histSigCache = all; this._histSigTs = n;
-    return all;
+   *  and was never the archive.
+   *
+   *  MEMORY DISCIPLINE (learned live, 2026-10-24): this fold must NEVER
+   *  materialize the parsed history. The first version parsed every
+   *  signal + outcome record into a retained object graph and OOM-killed
+   *  the 512Mi instance on its first two production calls. Instead the
+   *  scan below builds a byte-offset INDEX (id, ts, source, offset,
+   *  length — ~100B per record, line bodies parsed only to read id/ts
+   *  and immediately discarded), and a page request re-reads ONLY the
+   *  lines it serves (hot: random-access reads; archive: one streaming
+   *  decompression, sliced). Peak extra memory is one raw file buffer,
+   *  freed when the scan returns — never the parsed graph. 60s cache,
+   *  the vetoRecords idiom. */
+  _scanStream(hotFile) {
+    const entries = [];
+    const gzFile = path.join(this.dir, 'archive', path.basename(hotFile) + '.gz');
+    const scanBuf = (buf, src, file) => {
+      let start = 0;
+      while (start < buf.length) {
+        let nl = buf.indexOf(0x0a, start);
+        if (nl === -1) nl = buf.length;
+        if (nl > start) {
+          let rec = null;
+          try { rec = JSON.parse(buf.toString('utf8', start, nl)); } catch { /* skip bad line */ }
+          if (rec && rec.id) entries.push({ id: rec.id, ts: rec.ts || 0, src, off: start, len: nl - start, file });
+        }
+        start = nl + 1;
+      }
+    };
+    try { scanBuf(zlib.gunzipSync(fs.readFileSync(gzFile)), 'arch', gzFile); } catch { /* no archive yet */ }
+    try { scanBuf(fs.readFileSync(hotFile), 'hot', hotFile); } catch { /* no hot file yet */ }
+    return entries;
   }
 
-  /** One page of the complete signal history: {total, offset, limit, items}. */
+  _historyIndex() {
+    const n = this.now();
+    if (this._histIdx && n - this._histIdxTs < 60000) return this._histIdx;
+    const sigById = new Map();
+    for (const e of this._scanStream(this.f.sig)) sigById.set(e.id, e); // archive scanned first — hot wins on a duplicated id
+    const sigList = [...sigById.values()].sort((a, b) => b.ts - a.ts);
+    const outById = new Map();
+    for (const e of this._scanStream(this.f.out)) outById.set(e.id, e);
+    this._histIdx = { sigList, outById };
+    this._histIdxTs = n;
+    return this._histIdx;
+  }
+
+  /** Parse exactly the journal lines the given index entries point at —
+   *  nothing more is ever materialized. Returns Map(entry -> record). */
+  _extractLines(entries) {
+    const out = new Map();
+    const byFile = new Map();
+    for (const e of entries) { if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e); }
+    for (const [file, list] of byFile) {
+      const arch = list[0].src === 'arch';
+      try {
+        if (arch) {
+          const buf = zlib.gunzipSync(fs.readFileSync(file));
+          for (const e of list) { try { out.set(e, JSON.parse(buf.toString('utf8', e.off, e.off + e.len))); } catch { /* skip */ } }
+        } else {
+          const fd = fs.openSync(file, 'r');
+          try {
+            for (const e of list) {
+              const b = Buffer.alloc(e.len);
+              fs.readSync(fd, b, 0, e.len, e.off);
+              try { out.set(e, JSON.parse(b.toString('utf8'))); } catch { /* skip */ }
+            }
+          } finally { fs.closeSync(fd); }
+        }
+      } catch { /* source raced away — the page serves what it could read */ }
+    }
+    return out;
+  }
+
+  /** One page of the complete signal history, signals joined to their
+   *  outcomes by id, newest first: {total, offset, limit, items}. */
   historySignalsPage({ offset = 0, limit = 200 } = {}) {
-    const all = this._historySignals();
-    return { total: all.length, offset, limit, items: all.slice(offset, offset + limit) };
+    const { sigList, outById } = this._historyIndex();
+    const page = sigList.slice(offset, offset + limit);
+    const sigRecs = this._extractLines(page);
+    const outRecs = this._extractLines(page.map(e => outById.get(e.id)).filter(Boolean));
+    const outMap = new Map();
+    for (const [e, rec] of outRecs) outMap.set(e.id, rec);
+    const items = [];
+    for (const e of page) {
+      const rec = sigRecs.get(e);
+      if (!rec) continue;
+      rec.out = outMap.get(e.id) || rec.out || {};
+      items.push(rec);
+    }
+    return { total: sigList.length, offset, limit, items };
   }
 
   /** One page of the durable +1h/+4h post-exit marks (SPEC §4(c)),

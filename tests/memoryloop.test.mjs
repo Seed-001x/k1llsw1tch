@@ -166,6 +166,13 @@ test('journal: /history fold serves hot + archived signals joined to outcomes, p
   const a = j.historySignalsPage({ offset: 0, limit: 200 }).items.find(s => s.id === idA);
   assert.equal(a.out.r60, 0.4);
   assert.equal(a.stale, undefined);                   // hot record wins over its archived twin
+  // MEMORY DISCIPLINE (the 2026-10-24 live OOM): the cached fold is a
+  // byte-offset index ONLY — no parsed record bodies are ever retained.
+  const idx = j._historyIndex();
+  assert.equal(idx.sigList.length, 3);
+  for (const e of idx.sigList) {
+    assert.deepEqual(Object.keys(e).sort(), ['file', 'id', 'len', 'off', 'src', 'ts']);
+  }
 });
 
 test('journal: post-exit marks fold + page (SPEC §4(c) read path)', () => {
